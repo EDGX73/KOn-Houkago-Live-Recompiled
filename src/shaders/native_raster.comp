@@ -1,0 +1,396 @@
+#version 450
+#extension GL_ARB_gpu_shader_int64 : require
+layout(local_size_x=8,local_size_y=8) in;
+layout(set=0,binding=0,std430) buffer Storage {uint w[];};
+// Host-visible copy of the storage (same layout): presentable images only.
+layout(set=0,binding=1,std430) writeonly buffer Host {uint host[];};
+// The same storage, read only: headers, jobs, tile tables and textures, which
+// no pass writes while it runs (cached scalar loads where the address is uniform).
+layout(set=0,binding=2,std430) readonly restrict buffer Packets {uint r[];};
+// Pipeline variant (specialization constant 0): 1 compiles only the 4x block
+// pass, 2 only the per-sample enlarged pass (2x, 3x): much smaller programs
+// than the shader with every pass in it.
+layout(constant_id=0) const uint kBlocksOnly=0u;
+layout(push_constant) uniform Push {uvec4 a;uvec4 b;uvec4 c;} pc;
+// Header of the draw being shaded: a push constant for one draw, or taken
+// from each tile entry when a whole batch is shaded in one dispatch.
+uint hb;
+// Internal resolution (batch mode, pc.c.x=N>1): the same jobs are shaded on
+// an N-times larger surface (pc.c.y color, pc.c.z depth, stride N times the
+// draw's). (sx,sy) is the original pixel containing the sample, used for job
+// bounds and tiles; color/depth come from cbase/zbase.
+uint N=1u,sx,sy,cbase,zbase;
+#define H(n) r[hb+(n)]
+int64_t r64(uint n){return int64_t(packUint2x32(uvec2(r[n],r[n+1])));}
+bool compareValue(uint f,uint a,uint b){f&=7;return f==0?false:f==1?true:f==2?a==b:f==3?a!=b:f==4?a<b:f==5?a<=b:f==6?a>b:a>=b;}
+uint decodeColor(uint c,uint f){
+ if(f==3)return c;
+ uint r,g,b,a;
+ if(f<2){r=c&31;g=(c>>5)&(f==0?63:31);b=(c>>(f==0?11:10))&31;r=(r<<3)|(r>>2);g=f==0?(g<<2)|(g>>4):(g<<3)|(g>>2);b=(b<<3)|(b>>2);a=f==0?255:((c&32768)!=0?255:0);}
+ else{r=(c&15)*17;g=((c>>4)&15)*17;b=((c>>8)&15)*17;a=((c>>12)&15)*17;}
+ return r|(g<<8)|(b<<16)|(a<<24);
+}
+uint packColor(uint c,uint f){uint r=c&255,g=(c>>8)&255,b=(c>>16)&255,a=c>>24;return f==0?(r>>3)|((g>>2)<<5)|((b>>3)<<11):f==1?(r>>3)|((g>>3)<<5)|((b>>3)<<10)|((a>>7)<<15):f==2?(r>>4)|((g>>4)<<4)|((b>>4)<<8)|((a>>4)<<12):c;}
+uint fetchTex(int x,int y){int tw=int(H(18)),th=int(H(19));x=(H(20)&1)!=0?clamp(x,0,tw-1):x&(tw-1);y=(H(20)&256)!=0?clamp(y,0,th-1):y&(th-1);return r[H(2)+uint(y)*uint(tw)+uint(x)];}
+uint sampleTex(int ux,int vy,bool linear){
+ if(!linear)return fetchTex(ux>>4,vy>>4);
+ int x=(ux-8)>>4,y=(vy-8)>>4;uint fu=uint(ux-8)&15,fv=uint(vy-8)&15;
+ uint t[4]=uint[4](fetchTex(x,y),fetchTex(x+1,y),fetchTex(x,y+1),fetchTex(x+1,y+1));uint color=0;
+ for(uint shift=0;shift<32;shift+=8){uint top=(((t[0]>>shift)&255)*(16-fu)+((t[1]>>shift)&255)*fu)>>4;uint bottom=(((t[2]>>shift)&255)*(16-fu)+((t[3]>>shift)&255)*fu)>>4;color|=((top*(16-fv)+bottom*fv)>>4)<<shift;}return color;
+}
+// Enlarged 2D draws: "sharp" bilinear. Each fraction is steepened by k (samples
+// per texel along that axis), so texels stay solid and only their borders
+// blend over about one sample, instead of the blur of plain bilinear at N x.
+uint sampleTexSharp(int ux,int vy,float ku,float kv){
+ int x=(ux-8)>>4,y=(vy-8)>>4;
+ float su=clamp((float(uint(ux-8)&15u)/16.0-0.5)*ku+0.5,0.0,1.0),sv=clamp((float(uint(vy-8)&15u)/16.0-0.5)*kv+0.5,0.0,1.0);
+ uint fu=uint(su*16.0+0.5),fv=uint(sv*16.0+0.5);
+ uint t[4]=uint[4](fetchTex(x,y),fetchTex(x+1,y),fetchTex(x,y+1),fetchTex(x+1,y+1));uint color=0;
+ for(uint shift=0;shift<32;shift+=8){uint top=(((t[0]>>shift)&255)*(16-fu)+((t[1]>>shift)&255)*fu)>>4;uint bottom=(((t[2]>>shift)&255)*(16-fu)+((t[3]>>shift)&255)*fu)>>4;color|=((top*(16-fv)+bottom*fv)>>4)<<shift;}return color;
+}
+// Enlarged copy of the texture (2 or 4 times each side; H(26): its word offset,
+// log2 of the factor in bits 28-29, 0 = none;
+// see native_upscale.hpp), used by 2D draws at internal resolution: plain
+// bilinear at the sample's position, given in original texels.
+uint fetchTexHi(int x,int y){uint S=1u<<(H(26)>>28);int tw=int(H(18)*S),th=int(H(19)*S);x=(H(20)&1)!=0?clamp(x,0,tw-1):x&(tw-1);y=(H(20)&256)!=0?clamp(y,0,th-1):y&(th-1);return r[(H(26)&0x0FFFFFFFu)+uint(y)*uint(tw)+uint(x)];}
+uint sampleTexHi(float u,float v){
+ float S=float(1u<<(H(26)>>28)),x=u*S-0.5,y=v*S-0.5,fx=floor(x),fy=floor(y);int ix=int(fx),iy=int(fy);
+ uint fu=min(uint((x-fx)*16.0+0.5),16u),fv=min(uint((y-fy)*16.0+0.5),16u);
+ uint t[4]=uint[4](fetchTexHi(ix,iy),fetchTexHi(ix+1,iy),fetchTexHi(ix,iy+1),fetchTexHi(ix+1,iy+1));uint color=0;
+ for(uint shift=0;shift<32;shift+=8){uint top=(((t[0]>>shift)&255)*(16-fu)+((t[1]>>shift)&255)*fu)>>4;uint bottom=(((t[2]>>shift)&255)*(16-fu)+((t[3]>>shift)&255)*fu)>>4;color|=((top*(16-fv)+bottom*fv)>>4)<<shift;}return color;
+}
+uint combineTex(uint c,uint t){uint mode=H(17)&7;bool rgba=(H(17)&256)!=0,doubled=(H(17)&65536)!=0;uint color=0;
+ for(uint shift=0;shift<24;shift+=8){uint a=(c>>shift)&255,b=(t>>shift)&255,e=(H(27)>>shift)&255,alpha=t>>24,value=0;
+  if(mode==0)value=(a+1)*b/(doubled?128:256);
+  else if(mode==1){value=rgba?(a*(255-alpha)+b*alpha)/255:b;if(doubled)value*=2;}
+  else if(mode==2)value=((255-b)*a+b*e+255)/(doubled?128:256);
+  else if(mode==3)value=b*(doubled?2:1);else value=(a+b)*(doubled?2:1);
+  color|=min(value,255)<<shift;
+ }
+ uint alpha=!rgba||mode==1?c>>24:mode==3?t>>24:((c>>24)+1)*(t>>24)/256;return color|(alpha<<24);
+}
+int blendFactor(uint f,bool incoming,uint c,uint d,uint shift){if(f==0)return int(((incoming?d:c)>>shift)&255);if(f==1)return 255-int(((incoming?d:c)>>shift)&255);if(f==2)return int(c>>24);if(f==3)return 255-int(c>>24);if(f==4)return int(d>>24);if(f==5)return 255-int(d>>24);return int(((incoming?H(15):H(16))>>shift)&255);}
+uint blendColor(uint c,uint d){uint color=0,op=(H(14)>>8)&7;for(uint shift=0;shift<24;shift+=8){int s=int((c>>shift)&255),v=int((d>>shift)&255),value;
+ if(op>=3)value=op==3?min(s,v):op==4?max(s,v):abs(s-v);
+ else{int a=((s*2+1)*(blendFactor(H(14)&15,true,c,d,shift)*2+1))>>10;int b=((v*2+1)*(blendFactor((H(14)>>4)&15,false,c,d,shift)*2+1))>>10;value=op==0?a+b:op==1?a-b:b-a;}color|=uint(clamp(value,0,255))<<shift;}return color;}
+// blendColor with the three channels at once (same integer arithmetic): the
+// factors are chosen once instead of per channel. Enlarged passes only.
+ivec3 rgb(uint c){return ivec3(int(c&255u),int((c>>8)&255u),int((c>>16)&255u));}
+ivec3 blendFactorVec(uint f,bool incoming,uint c,uint d){
+ if(f<2u){ivec3 v=rgb(incoming?d:c);return f==0u?v:255-v;}
+ if(f==2u)return ivec3(int(c>>24));if(f==3u)return ivec3(255-int(c>>24));
+ if(f==4u)return ivec3(int(d>>24));if(f==5u)return ivec3(255-int(d>>24));
+ return rgb(incoming?H(15):H(16));
+}
+uint blendColorVec(uint c,uint d){
+ uint op=(H(14)>>8)&7;ivec3 s=rgb(c),v=rgb(d),value;
+ if(op>=3u)value=op==3u?min(s,v):op==4u?max(s,v):abs(s-v);
+ else{ivec3 a=((s*2+1)*(blendFactorVec(H(14)&15,true,c,d)*2+1))>>10,b=((v*2+1)*(blendFactorVec((H(14)>>4)&15,false,c,d)*2+1))>>10;value=op==0u?a+b:op==1u?a-b:b-a;}
+ uvec3 r=uvec3(clamp(value,0,255));return r.x|(r.y<<8)|(r.z<<16);
+}
+int64_t edge(ivec2 a,ivec2 b,ivec2 p){return int64_t(b.x-a.x)*int64_t(p.y-a.y)-int64_t(b.y-a.y)*int64_t(p.x-a.x);}
+// Tiles of this thread's original pixel that the guest or the CPU changed:
+// their color/depth start from the original words (before the tile table).
+bool tileColorDirty=false,tileDepthDirty=false;uint dirtyBase=0;
+uint nativeColor(){return w[r[dirtyBase]+sy*r[dirtyBase+1]+sx];}
+// Block passes: the 2x2 block at (blockX,blockY) and which of its samples lie
+// inside the batch. At 3x a block can span two original pixels, so the
+// original words of a changed tile are read per sample.
+uint blockX=0u,blockY=0u,insideMask=15u;
+uint nativeColorOf(uint s){return w[r[dirtyBase]+((blockY+(s>>1u))/N)*r[dirtyBase+1]+(blockX+(s&1u))/N];}
+uint nativeDepthOf(uint s){return w[r[dirtyBase+2]+((blockY+(s>>1u))/N)*r[dirtyBase+3]+(blockX+(s&1u))/N];}
+uint nativeDepth(){return w[r[dirtyBase+2]+sy*r[dirtyBase+3]+sx];}
+void readDirtyTiles(){dirtyBase=pc.a.y-(4u+2u*(pc.a.w*64u/32u));uint tile=(sy/16u)*pc.a.w+sx/16u;tileColorDirty=((r[dirtyBase+4u+tile/32u]>>(tile%32u))&1u)!=0u;tileDepthDirty=((r[dirtyBase+4u+pc.a.w*2u+tile/32u]>>(tile%32u))&1u)!=0u;}
+// Edge function in float for enlarged passes. Differences below 2^24 convert
+// exactly, so each product and the difference err by at most 2^-24 of their
+// size: beyond 2^-20 of it the sign is certain. Closer to zero (samples on or
+// next to the edge) the exact 64-bit value decides, keeping the tie rules.
+float fedge(ivec2 a,ivec2 b,ivec2 p){vec2 d=vec2(b-a),q=vec2(p-a);float t1=d.x*q.y,t2=d.y*q.x,e=t1-t2;
+ if(abs(e)<=(abs(t1)+abs(t2))*(1.0/1048576.0))e=float(edge(a,b,p));return e;}
+// One job (triangle) of the current draw at pixel (x,y). The arithmetic and
+// its order are unchanged from the per-draw kernel; only control flow moved.
+// One job (triangle) at pixel (x,y). Packet layout and integer arithmetic
+// mirror native_fixed_raster.hpp exactly (kFixedJobWords=50 per job).
+void shadeJob(uint j,uint x,uint y,inout uint color,inout uint zold,inout uvec4 counts,inout bool zdirty,inout bool loaded,inout bool zloaded,uint pixel,uint zpixel){
+  uint flags=r[j+10];
+  if(sx<r[j+6]||sy<r[j+7]||sx>=r[j+8]||sy>=r[j+9])return;
+  ivec2 a=ivec2(r[j],r[j+1])*int(N),b=ivec2(r[j+2],r[j+3])*int(N),c=ivec2(r[j+4],r[j+5])*int(N),p=ivec2(x*16+8,y*16+8);
+  int64_t ea=0,eb=0,ec=0;float feb=0.0,fec=0.0;
+  if(N>1u){float fea=fedge(a,b,p);feb=fedge(b,c,p);fec=fedge(c,a,p);
+   if(fea<0.0||feb<0.0||fec<0.0||(fea==0.0&&(flags&8)==0)||(feb==0.0&&(flags&16)==0)||(fec==0.0&&(flags&32)==0))return;}
+  else if(r[j+12]!=0){ea=int64_t((b.x-a.x)*(p.y-a.y)-(b.y-a.y)*(p.x-a.x));eb=int64_t((c.x-b.x)*(p.y-b.y)-(c.y-b.y)*(p.x-b.x));ec=int64_t((a.x-c.x)*(p.y-c.y)-(a.y-c.y)*(p.x-c.x));}
+  else{ea=edge(a,b,p);eb=edge(b,c,p);ec=edge(c,a,p);}
+  if(N==1u&&(ea<0||eb<0||ec<0||(ea==0&&(flags&8)==0)||(eb==0&&(flags&16)==0)||(ec==0&&(flags&32)==0)))return;
+  counts.x++;
+  // Batch mode loads destination words only for covered pixels, which lie
+  // inside this draw's validated color/depth extent.
+  if(!loaded){color=tileColorDirty?nativeColor():w[cbase+pixel];loaded=true;}if(!zloaded&&(H(11)&24)!=0){zold=tileDepthDirty?nativeDepth():w[zbase+zpixel];zloaded=true;}
+  uint z,source=r[j+11];int ux=0,vy=0;bool textured=(H(11)&1)!=0,sharp=false,hi=false;float sharpU=1.0,sharpV=1.0,hu=0.0,hv=0.0;
+  if(N>1u){
+   // Enlarged pass (no bit-exact match needed): float weights and
+   // interpolation instead of ~30 emulated 64-bit multiplies; coverage above
+   // stays exact, so shared edges still meet without gaps or double blends.
+   // Edge values and the area both grow by N*N at N times the resolution.
+   float s=float(r64(j+14))*(1.0/72057594037927936.0)/float(N*N); // inverse area: 2^56/area
+   float fa=feb*s,fb=fec*s,fc=1.0-fa-fb;
+   z=(flags&4)!=0?r[j+13]:uint(clamp((float(r64(j+16))*fa+float(r64(j+18))*fb+float(r64(j+20))*fc)*(1.0/256.0),0.0,65535.0));
+   if((H(11)&32)!=0&&!compareValue(H(13),z,zold)){counts.z++;return;}
+   if((flags&2)==0){source=0;for(uint n=0;n<4;++n)source|=uint(clamp((float(int(r[j+22+n]))*fa+float(int(r[j+26+n]))*fb+float(int(r[j+30+n]))*fc)*(1.0/256.0),0.0,255.0))<<(n*8);}
+   if(textured){
+    float nu=float(r64(j+34))*fa+float(r64(j+36))*fb+float(r64(j+38))*fc,nv=float(r64(j+40))*fa+float(r64(j+42))*fb+float(r64(j+44))*fc;
+    float d=(H(11)&2)!=0?256.0:(float(int(r[j+46]))*fa+float(int(r[j+47]))*fb+float(int(r[j+48]))*fc)*256.0;
+    ux=int(floor(nu/d));vy=int(floor(nv/d));
+    if(H(26)!=0u){hi=true;hu=nu/d*(1.0/16.0);hv=nv/d*(1.0/16.0);}
+    else if((H(11)&2)!=0&&(flags&1)!=0){
+     // Through mode (affine): texels advanced per sample, from the weight gradients.
+     float ax=-float(c.y-b.y)*16.0*s,bx=-float(a.y-c.y)*16.0*s,ay=float(c.x-b.x)*16.0*s,by=float(a.x-c.x)*16.0*s;
+     float u0=float(r64(j+34)),u1=float(r64(j+36)),u2=float(r64(j+38)),v0=float(r64(j+40)),v1=float(r64(j+42)),v2=float(r64(j+44));
+     float scale=1.0/(256.0*16.0);
+     float dux=((u0-u2)*ax+(u1-u2)*bx)*scale,duy=((u0-u2)*ay+(u1-u2)*by)*scale,dvx=((v0-v2)*ax+(v1-v2)*bx)*scale,dvy=((v0-v2)*ay+(v1-v2)*by)*scale;
+     sharpU=clamp(1.0/max(max(abs(dux),abs(duy)),1e-6),1.0,16.0);sharpV=clamp(1.0/max(max(abs(dvx),abs(dvy)),1e-6),1.0,16.0);sharp=true;
+    }
+   }
+  }else{
+   int64_t inv=r64(j+14),wa=(eb*inv)>>32,wb=(ec*inv)>>32,wc=(int64_t(1)<<24)-wa-wb;
+   z=(flags&4)!=0?r[j+13]:uint(clamp((r64(j+16)*wa+r64(j+18)*wb+r64(j+20)*wc)>>32,int64_t(0),int64_t(65535)));
+   if((H(11)&32)!=0&&!compareValue(H(13),z,zold)){counts.z++;return;}
+   if((flags&2)==0){source=0;for(uint n=0;n<4;++n){int64_t v=(int64_t(int(r[j+22+n]))*wa+int64_t(int(r[j+26+n]))*wb+int64_t(int(r[j+30+n]))*wc)>>32;source|=uint(clamp(v,int64_t(0),int64_t(255)))<<(n*8);}}
+   if(textured){
+    if((H(11)&2)!=0){ux=int((r64(j+34)*wa+r64(j+36)*wb+r64(j+38)*wc)>>32);vy=int((r64(j+40)*wa+r64(j+42)*wb+r64(j+44)*wc)>>32);}
+    else{int64_t pa=wa>>8,pb=wb>>8,pc8=wc>>8,q=int64_t(int(r[j+46]))*pa+int64_t(int(r[j+47]))*pb+int64_t(int(r[j+48]))*pc8;
+     ux=int(((r64(j+34)*pa+r64(j+36)*pb+r64(j+38)*pc8)/q)>>8);vy=int(((r64(j+40)*pa+r64(j+42)*pb+r64(j+44)*pc8)/q)>>8);}
+   }
+  }
+  if(textured){
+   source=combineTex(source,hi?sampleTexHi(hu,hv):sharp?sampleTexSharp(ux,vy,sharpU,sharpV):sampleTex(ux,vy,(flags&1)!=0));}
+  if((H(11)&64)!=0&&!compareValue(H(12),(source>>24)&((H(12)>>16)&255),(H(12)>>8)&255)){counts.y++;return;}
+  if((H(11)&8)!=0&&(H(11)&32)==0&&!compareValue(H(13),z,zold)){counts.z++;return;}
+  if((H(11)&4)!=0)source=N>1u?blendColorVec(source,decodeColor(color,H(9))):blendColor(source,decodeColor(color,H(9)));
+  color=(color&H(10))|(packColor(source,H(9))&~H(10));if((H(11)&16)!=0){zold=z;zdirty=true;}counts.w++;
+}
+uvec4 shadePixel(uint x,uint y){
+ if(x>=H(23)||y>=H(24))return uvec4(0);
+ sx=x;sy=y;cbase=H(0);zbase=H(1);
+ uint pixel=y*H(7)+x,zpixel=y*H(8)+x;
+ uvec4 counts=uvec4(0);uint color=w[H(0)+pixel],zold=(H(11)&24)!=0?w[H(1)+zpixel]:0;bool zdirty=false,loaded=true,zloaded=true;
+ uint tile=((y-H(22))/16)*H(25)+(x-H(21))/16,bin=H(5)+tile*2,first=r[bin],count=r[bin+1];
+ for(uint k=0;k<count;++k)shadeJob(H(3)+r[H(6)+first+k]*50,x,y,color,zold,counts,zdirty,loaded,zloaded,pixel,zpixel);
+ w[H(0)+pixel]=color;if((H(11)&16)!=0)w[H(1)+zpixel]=zold;
+ return counts;
+}
+// Whole-batch shading: every pixel walks, in original draw/job order, the
+// (header, job) entries of its absolute 16x16 tile. All draws in a batch
+// share color/depth storage and strides, so color/depth stay in registers
+// between draws and no barrier separates them. A draw's depth starts from
+// the buffer only if it tests depth, exactly as the per-draw kernel did.
+uvec4 shadeBatchPixel(uint x,uint y){
+ // Rounded workgroups may reach rows past the table (tiles below the union).
+ // High-resolution samples map to the original pixel containing them.
+ sx=x/N;sy=y/N;
+ if(sy>=pc.b.w||(N>1u&&y>=pc.c.w))return uvec4(0);
+ uint tile=(sy/16)*pc.a.w+sx/16,first=r[pc.a.y+tile*2],count=r[pc.a.y+tile*2+1];
+ uvec4 counts=uvec4(0);if(count==0)return counts;
+ uint color=0,zold=0,zbuffer=0,pixel=0,zpixel=0,draw=~0u;bool loaded=false,zloaded=false,zdirty=false,depth=false;
+ for(uint k=0;k<count;++k){uint e=pc.a.z+(first+k)*2;
+  if(r[e]!=draw){draw=r[e];hb=draw;pixel=y*H(7)*N+x;zpixel=y*H(8)*N+x;depth=(H(11)&24)!=0;
+   cbase=N>1u?pc.c.y:H(0);zbase=N>1u?pc.c.z:H(1);
+   // Per-draw start: a depth-testing draw sees the buffer left by earlier
+   // draws; other draws start from 0, as in the per-draw kernel.
+   zold=depth&&zloaded?zbuffer:0;
+  }
+  bool zw=false;shadeJob(r[e+1],x,y,color,zold,counts,zw,loaded,zloaded,pixel,zpixel);
+  if(depth&&zloaded)zbuffer=zold;if(zw)zdirty=true;
+ }
+ if(loaded)w[cbase+pixel]=color;if(zdirty)w[zbase+zpixel]=zbuffer;
+ return counts;
+}
+// Internal-resolution pass (pc.c.x=N>1). Workgroups start at multiples of 8
+// samples, so each covers one original 16x16 tile (16*N is a multiple of 8).
+// The group first keeps, in order, only the tile's entries whose job bounds
+// touch its original pixels; then every sample walks that short list with
+// the same per-entry logic as shadeBatchPixel. Skipped jobs would have been
+// rejected by their bounds anyway, so the result is the same.
+shared uint culledEntries[64];shared uint keptMask[2];
+uvec4 shadeBatchHires(uvec2 gid,uvec2 lid){
+ uint x0=(pc.b.y*N)&~7u,y0=(pc.b.z*N)&~7u,x=x0+gid.x,y=y0+gid.y,lane=lid.y*8u+lid.x;
+ uint gx=x0+(gid.x&~7u),gy=y0+(gid.y&~7u),ox0=gx/N,oy0=gy/N,ox1=(gx+7u)/N,oy1=(gy+7u)/N;
+ sx=x/N;sy=y/N;
+ bool inside=sy<pc.b.w&&y<pc.c.w&&sx>=pc.b.y;
+ readDirtyTiles();
+ uint first=0,count=0;
+ if(oy0<pc.b.w&&gy<pc.c.w){uint tile=(oy0/16)*pc.a.w+ox0/16;first=r[pc.a.y+tile*2];count=r[pc.a.y+tile*2+1];}
+ uint color=0,zold=0,zbuffer=0,pixel=0,zpixel=0,draw=~0u;bool loaded=false,zloaded=false,zdirty=false,depth=false;uvec4 counts=uvec4(0);
+ for(uint chunk=0;chunk<count;chunk+=64u){
+  uint k=chunk+lane,entry=0xffffffffu;
+  if(lane<2u)keptMask[lane]=0u;
+  barrier();
+  if(k<count){uint e=pc.a.z+(first+k)*2,j=r[e+1];if(ox1>=r[j+6]&&oy1>=r[j+7]&&ox0<r[j+8]&&oy0<r[j+9]){entry=e;atomicOr(keptMask[lane>>5],1u<<(lane&31u));}}
+  barrier();
+  // Ordered compaction: each kept entry's slot is the number of kept lanes before it.
+  uint low=keptMask[0],high=keptMask[1];
+  if(entry!=0xffffffffu)culledEntries[lane<32u?bitCount(low&((1u<<lane)-1u)):bitCount(low)+bitCount(high&((1u<<(lane-32u))-1u))]=entry;
+  barrier();
+  if(inside){uint n=bitCount(low)+bitCount(high);
+   for(uint i=0;i<n;++i){uint e=culledEntries[i];
+    if(r[e]!=draw){draw=r[e];hb=draw;pixel=y*H(7)*N+x;zpixel=y*H(8)*N+x;depth=(H(11)&24)!=0;cbase=pc.c.y;zbase=pc.c.z;zold=depth&&zloaded?zbuffer:0;}
+    bool zw=false;shadeJob(r[e+1],x,y,color,zold,counts,zw,loaded,zloaded,pixel,zpixel);
+    if(depth&&zloaded)zbuffer=zold;if(zw)zdirty=true;
+   }
+  }
+  barrier();
+ }
+ if(inside){if(loaded)w[cbase+pixel]=color;if(zdirty)w[zbase+zpixel]=zbuffer;
+  // Changed tiles no draw reached (or whose depth no draw wrote): the original words, enlarged.
+  if(tileColorDirty&&!loaded)w[pc.c.y+y*r[dirtyBase+1]*N+x]=nativeColor();
+  if(tileDepthDirty&&!zdirty)w[pc.c.z+y*r[dirtyBase+3]*N+x]=nativeDepth();}
+ return counts;
+}
+// 4x internal resolution: each thread owns a 2x2 block of samples (one
+// original pixel holds 2x2 blocks). Coverage, depth and blending stay exact
+// per sample; a job's color and texture are computed once per block, at its
+// first covered sample, so layered scenes cost a quarter of the shading.
+void shadeJobBlock(uint j,uint bx,uint by,inout uint color[4],inout uint zold[4],inout uvec4 counts,inout bool zdirty,inout bool loaded,inout bool zloaded,uint pixel,uint zpixel){
+ uint flags=r[j+10];
+ if((bx+1u)/N<r[j+6]||(by+1u)/N<r[j+7]||bx/N>=r[j+8]||by/N>=r[j+9])return;
+ ivec2 a=ivec2(r[j],r[j+1])*int(N),b=ivec2(r[j+2],r[j+3])*int(N),c=ivec2(r[j+4],r[j+5])*int(N);
+ float eb[4],ec[4];uint mask=0u;
+ for(uint s=0u;s<4u;++s){ivec2 p=ivec2((bx+(s&1u))*16u+8u,(by+(s>>1u))*16u+8u);float fea=fedge(a,b,p),feb=fedge(b,c,p),fec=fedge(c,a,p);eb[s]=feb;ec[s]=fec;
+  if(!(fea<0.0||feb<0.0||fec<0.0||(fea==0.0&&(flags&8)==0)||(feb==0.0&&(flags&16)==0)||(fec==0.0&&(flags&32)==0)))mask|=1u<<s;}
+ mask&=insideMask;
+ if(mask==0u)return;
+ counts.x+=bitCount(mask);
+ uint stride=H(7)*N,zstride=H(8)*N;
+ if(!loaded){if(tileColorDirty){for(uint s=0u;s<4u;++s)color[s]=nativeColorOf(s);}else for(uint s=0u;s<4u;++s)color[s]=w[cbase+pixel+(s>>1u)*stride+(s&1u)];loaded=true;}
+ if(!zloaded&&(H(11)&24)!=0){if(tileDepthDirty){for(uint s=0u;s<4u;++s)zold[s]=nativeDepthOf(s);}else for(uint s=0u;s<4u;++s)zold[s]=w[zbase+zpixel+(s>>1u)*zstride+(s&1u)];zloaded=true;}
+ // Edge values and the area both grow by N*N at N times the resolution.
+ float sc=float(r64(j+14))*(1.0/72057594037927936.0)/float(N*N);
+ uint f0=findLSB(mask);float fa=eb[f0]*sc,fb=ec[f0]*sc,fc=1.0-fa-fb;
+ uint source=r[j+11];bool hiBlock=false;
+ if((flags&2)==0){source=0;for(uint n=0;n<4;++n)source|=uint(clamp((float(int(r[j+22+n]))*fa+float(int(r[j+26+n]))*fb+float(int(r[j+30+n]))*fc)*(1.0/256.0),0.0,255.0))<<(n*8);}
+ if((H(11)&1)!=0){
+  float u0=float(r64(j+34)),u1=float(r64(j+36)),u2=float(r64(j+38)),v0=float(r64(j+40)),v1=float(r64(j+42)),v2=float(r64(j+44));
+  bool through=(H(11)&2)!=0;
+  if(H(26)!=0u)hiBlock=true;else{
+  float d=through?256.0:(float(int(r[j+46]))*fa+float(int(r[j+47]))*fb+float(int(r[j+48]))*fc)*256.0;
+  int ux=int(floor((u0*fa+u1*fb+u2*fc)/d)),vy=int(floor((v0*fa+v1*fb+v2*fc)/d));
+  if(through&&(flags&1)!=0){
+   // Through mode (affine): texels advanced per sample, from the weight gradients.
+   float ax=-float(c.y-b.y)*16.0*sc,bx2=-float(a.y-c.y)*16.0*sc,ay=float(c.x-b.x)*16.0*sc,by2=float(a.x-c.x)*16.0*sc,k=1.0/(256.0*16.0);
+   float dux=((u0-u2)*ax+(u1-u2)*bx2)*k,duy=((u0-u2)*ay+(u1-u2)*by2)*k,dvx=((v0-v2)*ax+(v1-v2)*bx2)*k,dvy=((v0-v2)*ay+(v1-v2)*by2)*k;
+   source=combineTex(source,sampleTexSharp(ux,vy,clamp(1.0/max(max(abs(dux),abs(duy)),1e-6),1.0,16.0),clamp(1.0/max(max(abs(dvx),abs(dvy)),1e-6),1.0,16.0)));
+  }else source=combineTex(source,sampleTex(ux,vy,(flags&1)!=0));}
+ }
+ // The alpha test depends only on the shaded color: it rejects the whole block.
+ if(!hiBlock&&(H(11)&64)!=0&&!compareValue(H(12),(source>>24)&((H(12)>>16)&255),(H(12)>>8)&255)){counts.y+=bitCount(mask);return;}
+ uint base=source;
+ float z0=float(r64(j+16)),z1=float(r64(j+18)),z2=float(r64(j+20));
+ // Samples of a block usually share their destination: blend each value once.
+ uint lastDst=0u,lastOut=0u;bool cached=false;
+ for(uint s=0u;s<4u;++s){
+  if(((mask>>s)&1u)==0u)continue;
+  float sa=eb[s]*sc,sb=ec[s]*sc;
+  if(hiBlock){
+   // Enlarged texture: its own texel position per sample (through mode, affine).
+   float u0=float(r64(j+34)),u1=float(r64(j+36)),u2=float(r64(j+38)),v0=float(r64(j+40)),v1=float(r64(j+42)),v2=float(r64(j+44)),sc2=1.0-sa-sb;
+   float d=(H(11)&2)!=0?256.0:(float(int(r[j+46]))*sa+float(int(r[j+47]))*sb+float(int(r[j+48]))*sc2)*256.0;
+   source=combineTex(base,sampleTexHi((u0*sa+u1*sb+u2*sc2)/d*(1.0/16.0),(v0*sa+v1*sb+v2*sc2)/d*(1.0/16.0)));
+   if((H(11)&64)!=0&&!compareValue(H(12),(source>>24)&((H(12)>>16)&255),(H(12)>>8)&255)){counts.y++;continue;}
+   cached=false;
+  }
+  uint z=(flags&4)!=0?r[j+13]:uint(clamp((z0*sa+z1*sb+z2*(1.0-sa-sb))*(1.0/256.0),0.0,65535.0));
+  if((H(11)&32)!=0&&!compareValue(H(13),z,zold[s])){counts.z++;continue;}
+  if((H(11)&8)!=0&&(H(11)&32)==0&&!compareValue(H(13),z,zold[s])){counts.z++;continue;}
+  counts.w++;
+  if(!cached||color[s]!=lastDst){lastDst=color[s];lastOut=(color[s]&H(10))|(packColor((H(11)&4)!=0?blendColorVec(source,decodeColor(color[s],H(9))):source,H(9))&~H(10));cached=true;}
+  color[s]=lastOut;if((H(11)&16)!=0){zold[s]=z;zdirty=true;}
+ }
+}
+// Workgroups of 8x8 threads cover 16x16 samples, starting at multiples of 16
+// (one part of one original 16x16 tile); culling as in shadeBatchHires.
+uvec4 shadeBatchBlocks(uvec2 gid,uvec2 lid){
+ uint x0=(pc.b.y*N)&~15u,y0=(pc.b.z*N)&~15u,bx=x0+gid.x*2u,by=y0+gid.y*2u,lane=lid.y*8u+lid.x;
+ uint gx=x0+(gid.x&~7u)*2u,gy=y0+(gid.y&~7u)*2u,ox0=gx/N,oy0=gy/N,ox1=(gx+15u)/N,oy1=(gy+15u)/N;
+ sx=bx/N;sy=by/N;blockX=bx;blockY=by;
+ insideMask=0u;for(uint s=0u;s<4u;++s){uint x=bx+(s&1u),y=by+(s>>1u);if(y/N<pc.b.w&&y<pc.c.w&&x/N>=pc.b.y)insideMask|=1u<<s;}
+ bool inside=insideMask!=0u;
+ readDirtyTiles();
+ uint first=0,count=0;
+ if(oy0<pc.b.w&&gy<pc.c.w){uint tile=(oy0/16)*pc.a.w+ox0/16;first=r[pc.a.y+tile*2];count=r[pc.a.y+tile*2+1];}
+ uint color[4]=uint[4](0u,0u,0u,0u),zold[4]=uint[4](0u,0u,0u,0u),zbuffer[4]=uint[4](0u,0u,0u,0u);
+ uint pixel=0,zpixel=0,draw=~0u;bool loaded=false,zloaded=false,zdirty=false,depth=false;uvec4 counts=uvec4(0);
+ for(uint chunk=0;chunk<count;chunk+=64u){
+  uint k=chunk+lane,entry=0xffffffffu;
+  if(lane<2u)keptMask[lane]=0u;
+  barrier();
+  if(k<count){uint e=pc.a.z+(first+k)*2,j=r[e+1];if(ox1>=r[j+6]&&oy1>=r[j+7]&&ox0<r[j+8]&&oy0<r[j+9]){entry=e;atomicOr(keptMask[lane>>5],1u<<(lane&31u));}}
+  barrier();
+  uint low=keptMask[0],high=keptMask[1];
+  if(entry!=0xffffffffu)culledEntries[lane<32u?bitCount(low&((1u<<lane)-1u)):bitCount(low)+bitCount(high&((1u<<(lane-32u))-1u))]=entry;
+  barrier();
+  if(inside){uint n=bitCount(low)+bitCount(high);
+   for(uint i=0;i<n;++i){uint e=culledEntries[i];
+    if(r[e]!=draw){draw=r[e];hb=draw;pixel=by*H(7)*N+bx;zpixel=by*H(8)*N+bx;depth=(H(11)&24)!=0;cbase=pc.c.y;zbase=pc.c.z;for(uint s=0u;s<4u;++s)zold[s]=depth&&zloaded?zbuffer[s]:0u;}
+    bool zw=false;shadeJobBlock(r[e+1],bx,by,color,zold,counts,zw,loaded,zloaded,pixel,zpixel);
+    if(depth&&zloaded)for(uint s=0u;s<4u;++s)zbuffer[s]=zold[s];if(zw)zdirty=true;
+   }
+  }
+  barrier();
+ }
+ if(inside&&draw!=~0u){uint stride=H(7)*N,zstride=H(8)*N;
+  if(loaded)for(uint s=0u;s<4u;++s)if(((insideMask>>s)&1u)!=0u)w[cbase+pixel+(s>>1u)*stride+(s&1u)]=color[s];
+  if(zdirty)for(uint s=0u;s<4u;++s)if(((insideMask>>s)&1u)!=0u)w[zbase+zpixel+(s>>1u)*zstride+(s&1u)]=zbuffer[s];}
+ // Changed tiles no draw reached (or whose depth no draw wrote): the original words, enlarged.
+ if(inside&&(tileColorDirty&&!loaded||tileDepthDirty&&!zdirty)){uint cs=r[dirtyBase+1]*N,zs=r[dirtyBase+3]*N,cp=pc.c.y+by*cs+bx,zp=pc.c.z+by*zs+bx;
+  if(tileColorDirty&&!loaded)for(uint s=0u;s<4u;++s)if(((insideMask>>s)&1u)!=0u)w[cp+(s>>1u)*cs+(s&1u)]=nativeColorOf(s);
+  if(tileDepthDirty&&!zdirty)for(uint s=0u;s<4u;++s)if(((insideMask>>s)&1u)!=0u)w[zp+(s>>1u)*zs+(s&1u)]=nativeDepthOf(s);}
+ return counts;
+}
+// Upscale (pc.a.x=0xfffffffe): original color/depth words (pc.a.y/pc.a.z,
+// strides pc.a.w/pc.b.x) copied to every sample of the N-times surface over
+// the original rectangle pc.b.y,pc.b.z - pc.b.w,(pc.c.w&0xffff); bit 16 of
+// pc.c.w selects color, bit 17 depth. Used where the guest or the CPU wrote
+// the original buffer outside GPU batches.
+void upscale(uint x,uint y){
+ uint n=pc.c.x,left=pc.b.y,top=pc.b.z,right=pc.b.w,bottom=pc.c.w&0xffffu;
+ uint ox=x/n,oy=y/n;if(ox<left||ox>=right||oy<top||oy>=bottom)return;
+ if((pc.c.w&0x10000u)!=0)w[pc.c.y+y*pc.a.w*n+x]=w[pc.a.y+oy*pc.a.w+ox];
+ if((pc.c.w&0x20000u)!=0)w[pc.c.z+y*pc.b.x*n+x]=w[pc.a.z+oy*pc.b.x+ox];
+}
+// Present colors (pc.a.x=0xfffffffd): enlarged plane words (pc.a.y, stride
+// pc.a.w in samples, format pc.b.x) to opaque BGRA over samples pc.b.y,pc.b.z -
+// pc.b.w,pc.c.x, written straight to host memory at pc.a.z (no readback copy).
+void present(uint x,uint y){
+ if(x>=pc.b.w||y>=pc.c.x)return;
+ uint c=decodeColor(w[pc.a.y+y*pc.a.w+x],pc.b.x);
+ host[pc.a.z+y*pc.a.w+x]=((c>>16)&255u)|(c&0xff00u)|((c&255u)<<16)|0xff000000u;
+}
+// Original pixels of an enlarged batch (pc.a.x=0xfffffffc): each takes its
+// block's sample (N/2,N/2). Color plane pc.a.y into pc.a.z (stride pc.a.w
+// original words); depth plane pc.b.x into pc.c.z when nonzero (stride
+// pc.c.w); original rectangle pc.b.y,pc.b.z - pc.b.w,pc.c.x; scale pc.c.y.
+void derive(uint x,uint y){
+ if(x>=pc.b.w||y>=pc.c.x)return;
+ uint n=pc.c.y,o=n/2u;
+ w[pc.a.z+y*pc.a.w+x]=w[pc.a.y+(y*n+o)*pc.a.w*n+x*n+o];
+ if(pc.c.z!=0u)w[pc.c.z+y*pc.c.w+x]=w[pc.b.x+(y*n+o)*pc.c.w*n+x*n+o];
+}
+shared uvec4 reduced[64];
+void main(){
+ uint lane=gl_LocalInvocationIndex;bool batch=pc.a.x==0xffffffffu;
+ if(kBlocksOnly==1u){batch=true;N=4u;hb=0;reduced[lane]=shadeBatchBlocks(gl_GlobalInvocationID.xy,gl_LocalInvocationID.xy);if(pc.b.x==0u)return;}
+ else if(kBlocksOnly==3u){batch=true;N=3u;hb=0;reduced[lane]=shadeBatchBlocks(gl_GlobalInvocationID.xy,gl_LocalInvocationID.xy);if(pc.b.x==0u)return;}
+ else if(kBlocksOnly==2u){batch=true;N=pc.c.x;hb=0;reduced[lane]=shadeBatchHires(gl_GlobalInvocationID.xy,gl_LocalInvocationID.xy);if(pc.b.x==0u)return;}
+ else{
+ if(pc.a.x==0xfffffffcu){derive(pc.b.y+gl_GlobalInvocationID.x,pc.b.z+gl_GlobalInvocationID.y);return;}
+ if(pc.a.x==0xfffffffdu){present(pc.b.y+gl_GlobalInvocationID.x,pc.b.z+gl_GlobalInvocationID.y);return;}
+ if(pc.a.x==0xfffffffeu){upscale(pc.b.y*pc.c.x+gl_GlobalInvocationID.x,pc.b.z*pc.c.x+gl_GlobalInvocationID.y);return;}
+ // High-resolution passes count samples (statistics word pc.b.x) only when
+ // they replace the original pass; otherwise pc.b.x is 0.
+ if(batch&&pc.c.x>1u){N=pc.c.x;hb=0;reduced[lane]=N==4u?shadeBatchBlocks(gl_GlobalInvocationID.xy,gl_LocalInvocationID.xy):shadeBatchHires(gl_GlobalInvocationID.xy,gl_LocalInvocationID.xy);if(pc.b.x==0u)return;}
+ else if(batch){hb=0;reduced[lane]=shadeBatchPixel(pc.b.y+gl_GlobalInvocationID.x,pc.b.z+gl_GlobalInvocationID.y);}
+ else{hb=pc.a.x;reduced[lane]=shadePixel(H(21)+gl_GlobalInvocationID.x,H(22)+gl_GlobalInvocationID.y);}
+ }
+ barrier();
+ for(uint step=32;step>0;step>>=1){if(lane<step)reduced[lane]+=reduced[lane+step];barrier();}
+ if(lane==0){uint stats=batch?pc.b.x:H(4);for(uint n=0;n<4;++n){uint value=reduced[0][n],old=atomicAdd(w[stats+n*2],value);if(old>0xffffffffu-value)atomicAdd(w[stats+n*2+1],1);}}
+}

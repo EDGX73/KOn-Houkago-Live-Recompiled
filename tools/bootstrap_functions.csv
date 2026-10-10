@@ -1,0 +1,4 @@
+name,address,size
+module_start,0x089001F8,0x114
+startup_worker,0x0890030C,0x294
+startup_libc_init,0x08900818,0xF0

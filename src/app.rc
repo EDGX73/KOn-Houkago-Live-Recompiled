@@ -1,0 +1,23 @@
+// Executable icon (tools/make_icon.py) and version information (kon_version.h).
+#include "kon_version.h"
+1 ICON "../assets/branding/icon.ico"
+1 VERSIONINFO
+FILEVERSION KON_VERSION_MAJOR,KON_VERSION_MINOR,KON_VERSION_PATCH,0
+PRODUCTVERSION KON_VERSION_MAJOR,KON_VERSION_MINOR,KON_VERSION_PATCH,0
+BEGIN
+  BLOCK "StringFileInfo"
+  BEGIN
+    BLOCK "040904B0"
+    BEGIN
+      VALUE "FileDescription", "K-On! Houkago Live!! Recompiled"
+      VALUE "ProductName", "K-On! Houkago Live!! Recompiled"
+      VALUE "FileVersion", KON_VERSION_STRING
+      VALUE "ProductVersion", KON_VERSION_STRING
+      VALUE "OriginalFilename", "K-On Houkago Live Recompiled.exe"
+    END
+  END
+  BLOCK "VarFileInfo"
+  BEGIN
+    VALUE "Translation", 0x409, 1200
+  END
+END
