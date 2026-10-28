@@ -192,7 +192,7 @@ en [docs/PUBLICACION.md](docs/PUBLICACION.md).
 
 El código propio del port usa [MIT](LICENSE). Los componentes de terceros conservan sus licencias y avisos respectivos; MIT no sustituye GPL/LGPL ni otras obligaciones.
 Componentes de terceros: PSPRecomp (MIT), zig (MIT), CPython (PSF), FFmpeg
-(LGPL), pspdecrypt (GPLv3). Los paquetes de Windows y la APK incluyen el binario de `pspdecrypt`; su código fuente completo (commit c156627, SHA-256 5c371659…) se adjunta en cada release y la licencia está en `licenses/pspdecrypt/`.
+(LGPL), pspdecrypt (GPLv3). Los paquetes de Windows y la APK incluyen el binario de `pspdecrypt`; su código fuente completo (commit c156627, SHA-256 5c371659…) está en `third_party/pspdecrypt/` y la licencia en `licenses/pspdecrypt/`.
 
 K-On! y Houkago Live!! son marcas y obras de sus respectivos propietarios.
 Este es un proyecto de aficionados sin relación con ellos y no incluye ningún

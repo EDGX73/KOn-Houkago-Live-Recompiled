@@ -6,8 +6,8 @@ Los paquetes de Windows y la APK de Android incluyen el binario pspdecrypt
 - Upstream: https://github.com/John-K/pspdecrypt
 - Commit: c156627db7634d395c380c0a9589130f603307fc
 - Licencia: GNU GPL v3 (texto en GPL-3.0.txt)
-- Fuente completa correspondiente: pspdecrypt_source-c156627-full.zip
-  adjunto en cada release (SHA-256
+- Fuente completa correspondiente: ../third_party/pspdecrypt/pspdecrypt_source-c156627-full.zip
+  en este mismo repositorio (SHA-256
   5c371659b52ad095c8b585a9db291000d8897dc927b312a582fc4142da07b185,
   218.688 bytes).
 - Modificaciones: derivado recortado a la ruta ~PSP/PRX para Android
