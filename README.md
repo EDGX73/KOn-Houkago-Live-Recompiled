@@ -17,15 +17,10 @@ performance limitations and fewer settings than the Windows version.*
 Versión propuesta: **0.2.0 beta**. Windows y Android tienen paquetes distintos.
 Consulta las [notas beta](docs/RELEASE_NOTES_0.2.0.md).
 
-**Estado de publicación:** la última release publicada es **v0.1.0** (Windows).
-La 0.2.0 está en preparación. Su APK Android y sus paquetes Windows todavía no
-están publicados: falta cerrar la revisión de licencias y procedencia de
-componentes de terceros y repetir la prueba en el dispositivo.
-
 ## Android arm64 — beta 0.2.0
 
-Cuando se publique, descarga `KOn-Houkago-Live-Recompiled-0.2.0-android.apk`
-desde la [release v0.2.0](../../releases/tag/v0.2.0).
+Descarga `KOn-Houkago-Live-Recompiled-0.2.0-android.apk` desde la
+[release v0.2.0](../../releases/tag/v0.2.0) cuando esté publicada.
 Instala la APK, selecciona tu propia ISO mediante el selector de archivos de
 Android (SAF), pulsa «Preparar juego» y, al finalizar, «Jugar».
 El proceso genera y compila localmente el módulo necesario para jugar,
@@ -197,8 +192,7 @@ en [docs/PUBLICACION.md](docs/PUBLICACION.md).
 
 El código propio del port usa [MIT](LICENSE). Los componentes de terceros conservan sus licencias y avisos respectivos; MIT no sustituye GPL/LGPL ni otras obligaciones.
 Componentes de terceros: PSPRecomp (MIT), zig (MIT), CPython (PSF), FFmpeg
-(LGPL), pspdecrypt (GPLv3). `pspdecrypt` se obtiene por separado: este
-repositorio no incluye su binario ni su fuente.
+(LGPL), pspdecrypt (GPLv3).
 
 K-On! y Houkago Live!! son marcas y obras de sus respectivos propietarios.
 Este es un proyecto de aficionados sin relación con ellos y no incluye ningún
