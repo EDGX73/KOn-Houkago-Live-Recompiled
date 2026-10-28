@@ -1,4 +1,5 @@
 #include "host_headphones.hpp"
+#ifdef _WIN32
 #ifndef NOMINMAX
 #define NOMINMAX
 #endif
@@ -41,3 +42,10 @@ HostHeadphoneState query_host_headphones(){
     return {headphone_form_factor(form),true,form};
 }
 }
+#else
+// Elsewhere the playback route is not known yet (Android: AudioManager through
+// JNI, a later step): report no endpoint, as Windows does without one.
+namespace kon {
+HostHeadphoneState query_host_headphones(){return {};}
+}
+#endif

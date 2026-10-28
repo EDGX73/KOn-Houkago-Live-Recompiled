@@ -40,19 +40,16 @@ public:
         if(std::filesystem::exists(native_path_)){load_native();result_=0;memory_.store32(pointer_+28u,result_);status_=3u;return 0;}
         // Never disguise an existing PSP save as absent, or copy encrypted
         // bytes into the unencrypted buffer supplied by the original game.
-        const auto attributes=GetFileAttributesW(directory_.c_str());
-        if(attributes==INVALID_FILE_ATTRIBUTES){
-            const auto error=GetLastError();
-            if(error!=ERROR_FILE_NOT_FOUND && error!=ERROR_PATH_NOT_FOUND)
-                throw std::runtime_error("Savedata directory inspection failed: "+std::to_string(error));
+        unsigned long error=0;
+        const auto slot=platform::path_kind(directory_,error);
+        if(slot==platform::PathKind::Error)throw std::runtime_error("Savedata directory inspection failed: "+std::to_string(error));
+        if(slot==platform::PathKind::Missing){
             result_=no_data;
         }else{
-            if(!(attributes&FILE_ATTRIBUTE_DIRECTORY))throw std::runtime_error("Savedata slot is not a directory");
-            const auto data_attributes=GetFileAttributesW(path_.c_str());
-            if(data_attributes!=INVALID_FILE_ATTRIBUTES)throw std::runtime_error("Existing savedata needs SFO validation and native decoding");
-            const auto error=GetLastError();
-            if(error!=ERROR_FILE_NOT_FOUND && error!=ERROR_PATH_NOT_FOUND)
-                throw std::runtime_error("Savedata file inspection failed: "+std::to_string(error));
+            if(slot!=platform::PathKind::Directory)throw std::runtime_error("Savedata slot is not a directory");
+            const auto data=platform::path_kind(path_,error);
+            if(data==platform::PathKind::File || data==platform::PathKind::Directory)throw std::runtime_error("Existing savedata needs SFO validation and native decoding");
+            if(data==platform::PathKind::Error)throw std::runtime_error("Savedata file inspection failed: "+std::to_string(error));
             result_=file_missing;
         }
         memory_.store32(pointer_+28u,result_);status_=3u;return 0;

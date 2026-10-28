@@ -11,6 +11,15 @@ $ctest = Join-Path $taskRoot 'third_party\python_build_deps\cmake\data\bin\ctest
 $ninja = Join-Path $taskRoot 'third_party\python_build_deps\bin\ninja.exe'
 $toolchain = Join-Path $taskRoot 'third_party\toolchain\zig-windows.cmake'
 $zig = Join-Path $taskRoot 'third_party\toolchain\zig-x86_64-windows-0.15.2\zig.exe'
+$python = if ($env:KON_PYTHON) { $env:KON_PYTHON } else { (Get-Command python -ErrorAction Stop).Source }
+# PSPRecomp: the pinned upstream revision plus patches/psprecomp/kon-port.patch.
+$patchTool = Join-Path $taskRoot 'tools\psprecomp_patch.py'
+if (-not (Test-Path -LiteralPath $sourceDir)) {
+    & $python $patchTool fetch
+    if ($LASTEXITCODE -ne 0) { throw 'Could not fetch PSPRecomp (tools/psprecomp_patch.py fetch)' }
+}
+& $python $patchTool check
+if ($LASTEXITCODE -ne 0) { Write-Warning 'third_party/PSPRecomp has changes that are not in patches/psprecomp/kon-port.patch: run "python tools/psprecomp_patch.py write" before exporting.' }
 foreach ($required in @($sourceDir,$cmake,$ctest,$ninja,$toolchain,$zig)) {
     if (-not (Test-Path -LiteralPath $required)) { throw "Required local dependency missing: $required" }
 }
@@ -33,10 +42,10 @@ function Invoke-Checked {
     if ($LASTEXITCODE -ne 0) { throw "Command failed with exit code $LASTEXITCODE; see $logPath" }
 }
 try {
-    $python = if ($env:KON_PYTHON) { $env:KON_PYTHON } else { (Get-Command python -ErrorAction Stop).Source }
-    foreach ($patch in @('apply_framework_patches.py','extend_framework.py','fix_import_codegen.py','fix_break_delay_slot.py','add_scratchpad_memory.py')) {
-        Invoke-Checked $python @((Join-Path $taskRoot ('tools\' + $patch)))
-    }
+    # The five scripts that first wrote the port's changes (tools/apply_framework_patches.py,
+    # extend_framework.py, fix_import_codegen.py, fix_break_delay_slot.py,
+    # add_scratchpad_memory.py) are part of kon-port.patch and later edits; they
+    # no longer apply to the current sources and are not run.
     Invoke-Checked $zig @('version')
     Invoke-Checked $cmake @('--version')
     Invoke-Checked $ninja @('--version')

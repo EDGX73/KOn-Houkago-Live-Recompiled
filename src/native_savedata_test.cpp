@@ -1,11 +1,13 @@
 #include "native_savedata.hpp"
+#include <chrono>
 #include <fstream>
 #include <iostream>
 void check(bool yes,const char* error){if(!yes)throw std::runtime_error(error);}
 int main(int argc,char** argv){try{
     if(argc!=2)throw std::runtime_error("Project root required");
     const std::filesystem::path root=argv[1];kon::ContentMount content(root,"ja");
-    kon::NativeFiles files(content,root/"work"/("savedata_fixture_"+std::to_string(GetTickCount64())));
+    const auto unique=std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
+    kon::NativeFiles files(content,root/"work"/("savedata_fixture_"+std::to_string(unique)));
     psprecomp::GuestMemory memory;kon::NativeSavedata service(memory,files);
     const auto request=0x08810000u;
     memory.store32(request,1536);memory.store32(request+28,0x12345678u);

@@ -60,6 +60,13 @@ public:
         }
     }
     bool available() const{return !samples_.empty();}
+    // Live device state for sceCtrlPeekBufferPositive: peeking must not consume
+    // the buffered samples that sceCtrlReadBufferPositive hands to the game.
+    HostPad peek_pad(){
+        auto pad=timed_source_?timed_source_(next_?next_:0):source_?source_():HostPad{};
+        if(!analog_)pad.x=pad.y=128;
+        return pad;
+    }
     unsigned read(psprecomp::GuestMemory& memory,std::uint32_t destination,unsigned count){
         const auto taken=std::min(count,static_cast<unsigned>(samples_.size()));
         const auto begin=samples_.size()-taken;

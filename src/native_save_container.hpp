@@ -1,6 +1,7 @@
 #pragma once
 #include "native_files.hpp"
 #include <array>
+#include <chrono>
 #include <fstream>
 #include <span>
 #include <vector>
@@ -54,12 +55,12 @@ struct NativeSaveContainer {
         // unknown file or discard a damaged save to hide a loading error.
         if(std::filesystem::exists(path)){const auto previous=read(path);if(previous.game!=game || previous.slot!=slot || previous.file!=file)throw std::runtime_error("PC save identity mismatch");if(!overwrite)throw std::runtime_error("Native save overwrite was not requested");}
         const auto data=encode();std::filesystem::create_directories(path.parent_path());
-        const auto temporary=path.wstring()+L".pending."+std::to_wstring(GetCurrentProcessId())+L"."+std::to_wstring(GetTickCount64());
-        const auto handle=CreateFileW(temporary.c_str(),GENERIC_WRITE,0,nullptr,CREATE_NEW,FILE_ATTRIBUTE_NORMAL,nullptr);
-        if(handle==INVALID_HANDLE_VALUE)throw std::runtime_error("Cannot create native save transaction");
-        DWORD written=0;const auto ok=WriteFile(handle,data.data(),static_cast<DWORD>(data.size()),&written,nullptr);const auto flushed=ok && written==data.size() && FlushFileBuffers(handle);const auto closed=CloseHandle(handle);
-        if(!flushed || !closed)throw std::runtime_error("Native save transaction did not reach storage");
-        if(!MoveFileExW(temporary.c_str(),path.c_str(),MOVEFILE_WRITE_THROUGH|(overwrite?MOVEFILE_REPLACE_EXISTING:0)))throw std::runtime_error("Cannot commit native save transaction");
+        const auto milliseconds=std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
+        auto temporary=path;temporary+=".pending."+std::to_string(platform::current_process_id())+"."+std::to_string(milliseconds);
+        const auto written=platform::write_new_file_durably(temporary,data);
+        if(written==platform::DurableWrite::CannotCreate)throw std::runtime_error("Cannot create native save transaction");
+        if(written!=platform::DurableWrite::Ok)throw std::runtime_error("Native save transaction did not reach storage");
+        if(!platform::move_file_durably(temporary,path,overwrite))throw std::runtime_error("Cannot commit native save transaction");
     }
 };
 }

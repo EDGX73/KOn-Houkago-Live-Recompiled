@@ -1,20 +1,10 @@
-#ifndef WIN32_LEAN_AND_MEAN
-#define WIN32_LEAN_AND_MEAN
-#endif
-#ifndef NOMINMAX
-#define NOMINMAX
-#endif
-#include <winsock2.h>
-#include <ws2tcpip.h>
-#include <windows.h>
-#include <iphlpapi.h>
+#include "platform/net.hpp"
 #include "native_online.hpp"
 #include <algorithm>
 #include <array>
 #include <cctype>
 #include <chrono>
 #include <cstring>
-#include <cwctype>
 namespace kon {
 namespace {
 constexpr char kAlphabet[]="0123456789ABCDEFGHJKMNPQRSTVWXYZ"; // Crockford base 32
@@ -52,15 +42,15 @@ std::optional<Url> parse_url(const std::string& url){
 std::optional<std::string> http(const Url& url,const std::string& request,std::string* local_ip=nullptr){
     addrinfo hints{};hints.ai_family=AF_INET;hints.ai_socktype=SOCK_STREAM;addrinfo* list=nullptr;
     if(getaddrinfo(url.host.c_str(),std::to_string(url.port).c_str(),&hints,&list) || !list)return std::nullopt;
-    const SOCKET s=socket(AF_INET,SOCK_STREAM,IPPROTO_TCP);
-    DWORD timeout=3000;setsockopt(s,SOL_SOCKET,SO_RCVTIMEO,reinterpret_cast<const char*>(&timeout),sizeof timeout);setsockopt(s,SOL_SOCKET,SO_SNDTIMEO,reinterpret_cast<const char*>(&timeout),sizeof timeout);
-    const bool ok=s!=INVALID_SOCKET && !connect(s,list->ai_addr,int(list->ai_addrlen));freeaddrinfo(list);
-    if(!ok){if(s!=INVALID_SOCKET)closesocket(s);return std::nullopt;}
-    if(local_ip){sockaddr_in me{};int length=sizeof me;getsockname(s,reinterpret_cast<sockaddr*>(&me),&length);char text[INET_ADDRSTRLEN]{};inet_ntop(AF_INET,&me.sin_addr,text,sizeof text);*local_ip=text;}
-    send(s,request.data(),int(request.size()),0);
+    const platform::Socket s=socket(AF_INET,SOCK_STREAM,IPPROTO_TCP);
+    platform::set_timeouts(s,3000);
+    const bool ok=s!=platform::invalid_socket && !connect(s,list->ai_addr,int(list->ai_addrlen));freeaddrinfo(list);
+    if(!ok){if(s!=platform::invalid_socket)platform::close_socket(s);return std::nullopt;}
+    if(local_ip){sockaddr_in me{};platform::SockLen length=sizeof me;getsockname(s,reinterpret_cast<sockaddr*>(&me),&length);char text[INET_ADDRSTRLEN]{};inet_ntop(AF_INET,&me.sin_addr,text,sizeof text);*local_ip=text;}
+    send(s,request.data(),int(request.size()),platform::send_flags);
     std::string answer;char buffer[8192];int got;
     while((got=recv(s,buffer,sizeof buffer,0))>0 && answer.size()<(1u<<20))answer.append(buffer,std::size_t(got));
-    closesocket(s);
+    platform::close_socket(s);
     if(answer.empty())return std::nullopt;
     return answer;
 }
@@ -70,7 +60,6 @@ std::optional<std::string> soap(const Url& control,const std::string& service,co
     return http(control,request,local_ip);
 }
 bool http_ok(const std::string& answer){return answer.rfind("HTTP/1.",0)==0 && answer.size()>12 && answer.compare(9,3,"200")==0;}
-struct Winsock {bool ok;Winsock(){WSADATA w{};ok=!WSAStartup(MAKEWORD(2,2),&w);}~Winsock(){if(ok)WSACleanup();}};
 }
 std::string room_code(const std::string& address,std::uint16_t port){
     std::vector<std::uint8_t> bytes;
@@ -99,28 +88,14 @@ bool private_ipv4(const std::string& address){
     return (v>>24)==10 || (v>>20)==0xAC1 || (v>>16)==0xC0A8 || (v>>22)==(100u<<2|1u) || (v>>16)==0xA9FE || (v>>24)==127 || v==0;
 }
 LocalAddresses local_addresses(){
-    LocalAddresses out;ULONG size=16384;std::vector<std::uint8_t> buffer(size);
-    auto* first=reinterpret_cast<IP_ADAPTER_ADDRESSES*>(buffer.data());
-    if(GetAdaptersAddresses(AF_UNSPEC,GAA_FLAG_SKIP_ANYCAST|GAA_FLAG_SKIP_MULTICAST|GAA_FLAG_SKIP_DNS_SERVER,nullptr,first,&size)==ERROR_BUFFER_OVERFLOW){
-        buffer.resize(size);first=reinterpret_cast<IP_ADAPTER_ADDRESSES*>(buffer.data());
-        if(GetAdaptersAddresses(AF_UNSPEC,GAA_FLAG_SKIP_ANYCAST|GAA_FLAG_SKIP_MULTICAST|GAA_FLAG_SKIP_DNS_SERVER,nullptr,first,&size)!=NO_ERROR)return out;
-    }
-    for(auto* a=first;a;a=a->Next){
-        if(a->OperStatus!=IfOperStatusUp || a->IfType==IF_TYPE_SOFTWARE_LOOPBACK)continue;
-        std::wstring label=std::wstring(a->FriendlyName?a->FriendlyName:L"")+L" "+(a->Description?a->Description:L"");
-        for(auto& c:label)c=wchar_t(std::towlower(c));
-        std::string vpn;
-        for(const auto& [key,name]:{std::pair{L"radmin",std::string("Radmin VPN")},{L"zerotier","ZeroTier"},{L"tailscale","Tailscale"},{L"hamachi","Hamachi"}})
-            if(label.find(key)!=std::wstring::npos)vpn=name;
-        for(auto* u=a->FirstUnicastAddress;u;u=u->Next){
-            const auto* sa=u->Address.lpSockaddr;char text[INET6_ADDRSTRLEN]{};
-            if(sa->sa_family==AF_INET){inet_ntop(AF_INET,&reinterpret_cast<const sockaddr_in*>(sa)->sin_addr,text,sizeof text);if(std::strncmp(text,"169.254.",8)){if(!vpn.empty())out.vpn.push_back({vpn,text});else out.ipv4.push_back(text);}}
-            else if(sa->sa_family==AF_INET6){
-                const auto& b=reinterpret_cast<const sockaddr_in6*>(sa)->sin6_addr.s6_addr;
-                // Global unicast (2000::/3), not a temporary-only or link-local address.
-                if((b[0]&0xE0)==0x20 && u->DadState==IpDadStatePreferred && u->SuffixOrigin!=IpSuffixOriginRandom){inet_ntop(AF_INET6,b,text,sizeof text);out.ipv6_global.push_back(text);}
-            }
-        }
+    LocalAddresses out;
+    for(const auto& a:platform::interface_addresses()){
+        std::string vpn;  // game VPNs, recognised by the adapter's names
+        for(const auto& [key,name]:{std::pair{"radmin",std::string("Radmin VPN")},{"zerotier","ZeroTier"},{"tailscale","Tailscale"},{"hamachi","Hamachi"}})
+            if(a.label.find(key)!=std::string::npos)vpn=name;
+        if(a.family==AF_INET){if(a.text.compare(0,8,"169.254.")){if(!vpn.empty())out.vpn.push_back({vpn,a.text});else out.ipv4.push_back(a.text);}}
+        // Global unicast (2000::/3), not a temporary-only or link-local address.
+        else if(a.family==AF_INET6 && a.stable_global_ipv6)out.ipv6_global.push_back(a.text);
     }
     return out;
 }
@@ -152,9 +127,9 @@ std::optional<UpnpService> upnp_wan_service(const std::string& description,const
     return std::nullopt;
 }
 UpnpMapping UpnpMapping::open(std::uint16_t port){
-    Winsock winsock;UpnpMapping m;m.port_=port;
-    const SOCKET s=socket(AF_INET,SOCK_DGRAM,IPPROTO_UDP);
-    if(s==INVALID_SOCKET){m.error="no network";return m;}
+    platform::NetworkSession winsock;UpnpMapping m;m.port_=port;
+    const platform::Socket s=socket(AF_INET,SOCK_DGRAM,IPPROTO_UDP);
+    if(s==platform::invalid_socket){m.error="sin red";return m;}
     const std::string search="M-SEARCH * HTTP/1.1\r\nHOST: 239.255.255.250:1900\r\nMAN: \"ssdp:discover\"\r\nMX: 2\r\nST: urn:schemas-upnp-org:device:InternetGatewayDevice:1\r\n\r\n";
     sockaddr_in to{};to.sin_family=AF_INET;to.sin_port=htons(1900);inet_pton(AF_INET,"239.255.255.250",&to.sin_addr);
     for(int n=0;n<2;++n)sendto(s,search.data(),int(search.size()),0,reinterpret_cast<sockaddr*>(&to),sizeof to);
@@ -162,12 +137,12 @@ UpnpMapping UpnpMapping::open(std::uint16_t port){
     const auto end=std::chrono::steady_clock::now()+std::chrono::milliseconds(2500);
     while(std::chrono::steady_clock::now()<end){
         fd_set read;FD_ZERO(&read);FD_SET(s,&read);timeval wait{0,200000};
-        if(select(0,&read,nullptr,nullptr,&wait)<=0)continue;
+        if(select(platform::select_bound({s}),&read,nullptr,nullptr,&wait)<=0)continue;
         char buffer[2048];const int got=recv(s,buffer,sizeof buffer,0);if(got<=0)continue;
         if(auto l=ssdp_location(std::string(buffer,std::size_t(got)));l && std::find(locations.begin(),locations.end(),*l)==locations.end())locations.push_back(*l);
     }
-    closesocket(s);
-    if(locations.empty()){m.error="no UPnP router answered (UPnP off or not supported)";return m;}
+    platform::close_socket(s);
+    if(locations.empty()){m.error="el router no respondió a UPnP (puede estar desactivado)";return m;}
     for(const auto& location:locations){
         const auto url=parse_url(location);if(!url)continue;
         std::string local; // the address this PC uses towards the router
@@ -181,16 +156,16 @@ UpnpMapping UpnpMapping::open(std::uint16_t port){
             const auto args="<NewRemoteHost></NewRemoteHost><NewExternalPort>"+std::to_string(port)+"</NewExternalPort><NewProtocol>TCP</NewProtocol><NewInternalPort>"+std::to_string(port)+"</NewInternalPort><NewInternalClient>";
             const auto reply=soap(*control,service->type,"AddPortMapping",args+local+"</NewInternalClient><NewEnabled>1</NewEnabled><NewPortMappingDescription>K-On Houkago Live Recompiled</NewPortMappingDescription><NewLeaseDuration>"+lease+"</NewLeaseDuration>");
             if(reply && http_ok(*reply)){m.mapped=true;m.internal_ip=local;return m;}
-            m.error="the router refused the port mapping"+(reply?" ("+xml_value(*reply,"errorDescription")+")":std::string{});
+            m.error="el router rechazó abrir el puerto"+(reply?" ("+xml_value(*reply,"errorDescription")+")":std::string{});
         }
         return m;
     }
-    if(m.error.empty())m.error="the UPnP router offers no port mapping service";
+    if(m.error.empty())m.error="el router no ofrece el servicio de apertura de puertos (UPnP)";
     return m;
 }
 void UpnpMapping::close(){
     if(!mapped)return;mapped=false;
-    Winsock winsock;
+    platform::NetworkSession winsock;
     if(const auto control=parse_url(control_url_))
         soap(*control,service_,"DeletePortMapping","<NewRemoteHost></NewRemoteHost><NewExternalPort>"+std::to_string(port_)+"</NewExternalPort><NewProtocol>TCP</NewProtocol>");
 }

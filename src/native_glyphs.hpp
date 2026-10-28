@@ -126,12 +126,13 @@ struct Canvas {
             if(auto* p=at(x,y))*p=(*p&0xFF000000u)|(color&0x00FFFFFFu);
     }
     // Word centered on (cx, cy): 5x7 letters one cell apart, each font cell
-    // scale x scale texels, with an optional one-texel outline.
-    void text(float cx,float cy,const std::string& word,unsigned scale,std::uint32_t color,std::uint32_t outline,bool outlined){
+    // scale x scale texels, with an optional one-texel outline. `clip` > 0
+    // keeps the ink inside that radius (the button ring).
+    void text(float cx,float cy,const std::string& word,unsigned scale,std::uint32_t color,std::uint32_t outline,bool outlined,float clip=0.f){
         const auto n=word.size();const float width=float(n*6-1)*scale;
-        for(std::size_t i=0;i<n;++i)letter_at(cx-width/2+float(i*6*scale)+2.5f*scale,cy,word[i],scale,color,outline,outlined);
+        for(std::size_t i=0;i<n;++i)letter_at(cx-width/2+float(i*6*scale)+2.5f*scale,cy,word[i],scale,color,outline,outlined,clip);
     }
-    void letter_at(float cx,float cy,char c,unsigned scale,std::uint32_t color,std::uint32_t outline,bool outlined){
+    void letter_at(float cx,float cy,char c,unsigned scale,std::uint32_t color,std::uint32_t outline,bool outlined,float clip=0.f){
         const auto* l=letter(c);if(!l)return;
         const int x0=int(std::floor(cx-2.5f*scale+0.5f)),y0=int(std::floor(cy-3.5f*scale+0.5f));
         const auto ink=[&](int x,int y){
@@ -140,6 +141,7 @@ struct Canvas {
         };
         for(int y=-1;y<=int(7*scale);++y)for(int x=-1;x<=int(5*scale);++x){
             auto* p=at(x0+x,y0+y);if(!p)continue;
+            if(clip>0.f && std::hypot(float(x0+x)+0.5f-cx,float(y0+y)+0.5f-cy)>clip)continue;
             if(ink(x,y))*p=(*p&0xFF000000u)|(color&0x00FFFFFFu);
             else if(outlined && (ink(x-1,y)||ink(x+1,y)||ink(x,y-1)||ink(x,y+1)))*p=(*p&0xFF000000u)|(outline&0x00FFFFFFu);
         }
@@ -154,15 +156,19 @@ inline bool apply_button_glyphs(std::span<std::uint32_t> pixels,unsigned width,u
     for(const auto& g:glyph_table::glyphs){
         if(g.hash!=hash || g.width!=width || g.height!=height)continue;
         const auto c=label(style,g.face);if(c.empty())continue;
-        const unsigned big=c.size()>1?1u:2u; // one character drawn double size
+        const float cx=g.x+0.5f,cy=g.y+0.5f; // table stores texel indices
+        const unsigned big=c.size()>1?1u:2u;
         changed=true;
         const bool xbox=style==1;
         switch(g.kind){
         case Kind::Badge:{ // dark disc with a light symbol: letter in the button color
-            const auto dark=canvas.average(g.x,g.y,g.radius*0.80f,g.radius*0.97f,[](unsigned l){return l<110;});
-            canvas.disk(g.x,g.y,g.radius*0.80f,dark);
-            const unsigned scale=g.radius>8.f?2u:1u;
-            canvas.text(g.x,g.y,c,c.size()>1?1u:scale,xbox?xbox_color(c):0xFFFFFFFFu,dark,false);
+            // CHECK! is a dot plus a light ring: keep the ring, only fill the dot.
+            const bool check=(g.hash==0x84bd7bb4479b4d2eull || g.hash==0x1806865d6c4fad5dull);
+            const float fill=check?4.6f:g.radius*0.80f;
+            const auto dark=canvas.average(cx,cy,fill*0.55f,fill,[](unsigned l){return l<110;});
+            canvas.disk(cx,cy,fill,dark);
+            const unsigned scale=c.size()>1?1u:(fill>=8.f?2u:1u);
+            canvas.text(cx,cy,c,scale,xbox?xbox_color(c):0xFFFFFFFFu,dark,false,fill);
             break;}
         case Kind::Note:{ // colored note head: white letter outlined in a darker head color
             // Xbox: the whole note sprite (head, stem, flag; 40x52 texels) takes the button color.
@@ -171,16 +177,17 @@ inline bool apply_button_glyphs(std::span<std::uint32_t> pixels,unsigned width,u
             canvas.disk(g.x,g.y,g.radius,head);
             canvas.text(g.x,g.y,c,big,0xFFFFFFFFu,scaled(head,1,2),true);
             break;}
-        case Kind::Ring:{ // "PUSH (o) BUTTON!!" ring of a song title card: disc in the button color, white letter
-            const auto ring=canvas.average(g.x,g.y,g.radius*0.55f,g.radius,[](unsigned l){return l>40 && l<230;});
+        case Kind::Ring:{ // "PUSH (o) BUTTON!!" ring: keep the outer ring, letter inside
+            const auto ring=canvas.average(cx,cy,g.radius*0.55f,g.radius,[](unsigned l){return l>40 && l<230;});
             const auto fill=xbox?xbox_color(c):ring;
-            canvas.disk(g.x,g.y,g.radius,fill);
-            canvas.text(g.x,g.y,c,g.radius>=8.f?big:1u,0xFFFFFFFFu,scaled(fill,1,2),true);
+            canvas.disk(cx,cy,g.radius*0.78f,fill);
+            const unsigned scale=c.size()>1?1u:(g.radius>=10.f?2u:1u);
+            canvas.text(cx,cy,c,scale,0xFFFFFFFFu,scaled(fill,1,2),true,g.radius*0.95f);
             break;}
         case Kind::Pill:{ // dark rounded label (START/SELECT): word redrawn inside, radius = half width
-            const auto dark=canvas.average(g.x,g.y,0.f,g.radius,[](unsigned l){return l<90;});
-            canvas.rect(g.x,g.y,g.radius-3.f,3.5f,dark);
-            canvas.text(g.x,g.y,c,1u,0xFFFFFFFFu,dark,false);
+            const auto dark=canvas.average(cx,cy,0.f,g.radius,[](unsigned l){return l<90;});
+            canvas.rect(cx,cy,g.radius-3.f,5.0f,dark);
+            canvas.text(cx,cy,c,1u,0xFFFFFFFFu,dark,false);
             break;}
         }
     }

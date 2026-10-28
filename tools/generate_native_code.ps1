@@ -20,7 +20,7 @@ if($report.import_wrappers -ne 238){throw 'Generated import table mismatch'}
 $metadata=[ordered]@{
     generated_at=[DateTimeOffset]::Now.ToString('o');elf_sha256=$expected.ToLower()
     framework_revision='f6e7d415c7f447b934cc3865a31eb725f353d659'
-    local_patch_scripts=@('tools/apply_framework_patches.py','tools/extend_framework.py','tools/fix_import_codegen.py','tools/fix_break_delay_slot.py','tools/add_scratchpad_memory.py')
+    framework_patch='patches/psprecomp/kon-port.patch'
     lowering_optimizations=(-not $Plain);report=$report;playable_port=$false
 }
 $metadata | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath (Join-Path $taskRoot 'analysis\native_codegen_provenance.json') -Encoding utf8

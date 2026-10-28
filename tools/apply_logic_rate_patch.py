@@ -301,6 +301,23 @@ def patch_fps_as_30(labels):
         return '\n'.join(lines)
     return change
 
+# The "PLEASE WAIT" loading screen stores [+64] = 1 x fps at 0x0886B128 and
+# decrements it by kon_logic_step30, so its 1 s becomes fps/30 s: 1 s at 30,
+# 5.6 s at 165 (measured). Keep the 30 FPS frame count so it lasts 1 s at any
+# rate. (The 3x fps [ +56 ] timer is the separate minimum-wait site patched
+# above; the 5x/2x sites were measured and are not this screen.)
+MENU_LOAD_MARK='// PC FPS patch: 30 FPS frames for the menu loading screen'
+def patch_menu_load(text):
+    if MENU_LOAD_MARK in text:return text
+    label='L_0886B128:\n';at=text.index(label)+len(label)
+    expected='    rt.memory().aot_store32(ctx.gpr[16] + static_cast<std::uint32_t>(64), ctx.gpr[2]);\n'
+    if text[at:at+len(expected)]!=expected:raise RuntimeError('L_0886B128: unexpected FPS store')
+    return text[:at]+'    ctx.set_gpr(2, 30u); '+MENU_LOAD_MARK+'\n'+text[at:]
+
+# The 5x (0018) and 2x (0032) sites were measured and are not this screen; the
+# confirmed 1x site is L_0886B128 in unit 0025 (list at 44.5 s at 165 FPS after
+# the patch, 48.5 s before).
+
 def main():
     changed=[]
     def run(unit,change):
@@ -314,13 +331,14 @@ def main():
     for unit in sorted({s[0] for s in SMOOTH_SITES}):run(unit,patch_smoothing([s for s in SMOOTH_SITES if s[0]==unit]))
     run('0125',patch_pad_repeat)
     run('0089',patch_fps_as_30([l for _,l in FPS_AS_30]))
+    run('0025',patch_menu_load)
     for unit in sorted({c[0] for c in COUNTDOWNS}):run(unit,patch_countdowns([c for c in COUNTDOWNS if c[0]==unit]))
     for unit in sorted({s[0] for s in SCALED_STEPS}):run(unit,patch_scaled([s for s in SCALED_STEPS if s[0]==unit]))
     for unit in sorted({g[0] for g in GATED_FUNCTIONS}):run(unit,patch_gates([g[1] for g in GATED_FUNCTIONS if g[0]==unit]))
     corpus=' '.join(p.read_text(encoding='utf-8') for p in CORPUS.glob('generated_unit_*.cpp'))
     if 'kon_logic_half_frame' in corpus:raise RuntimeError('stale 60 FPS-only patch left behind')
-    counts={'fps30':corpus.count(FPS30_MARK),'countdowns':corpus.count(COUNTDOWN_MARK),'scaled':corpus.count(SCALE_MARK),'gates':corpus.count(GATE_MARK),'pad':corpus.count(PAD_MARK),'timers':corpus.count(TIMER_MARK),'float':corpus.count(FLOAT_MARK),'divide':corpus.count(DIVIDE_MARK),'keyframe':corpus.count(KEYFRAME_MARK.strip())}
-    expected={'fps30':len(FPS_AS_30),'countdowns':len(COUNTDOWNS),'scaled':len(SCALED_STEPS),'gates':len(GATED_FUNCTIONS),'pad':4,'timers':len(FRAME_TIMERS),'float':sum(map(len,FLOAT_SITES.values())),'divide':sum(map(len,DIVIDE_SITES.values())),'keyframe':sum(map(len,KEYFRAME_SITES.values()))}
+    counts={'fps30':corpus.count(FPS30_MARK),'menu_load':corpus.count(MENU_LOAD_MARK),'countdowns':corpus.count(COUNTDOWN_MARK),'scaled':corpus.count(SCALE_MARK),'gates':corpus.count(GATE_MARK),'pad':corpus.count(PAD_MARK),'timers':corpus.count(TIMER_MARK),'float':corpus.count(FLOAT_MARK),'divide':corpus.count(DIVIDE_MARK),'keyframe':corpus.count(KEYFRAME_MARK.strip())}
+    expected={'fps30':len(FPS_AS_30),'menu_load':1,'countdowns':len(COUNTDOWNS),'scaled':len(SCALED_STEPS),'gates':len(GATED_FUNCTIONS),'pad':4,'timers':len(FRAME_TIMERS),'float':sum(map(len,FLOAT_SITES.values())),'divide':sum(map(len,DIVIDE_SITES.values())),'keyframe':sum(map(len,KEYFRAME_SITES.values()))}
     if counts!=expected:raise RuntimeError(f'patch counts {counts} != {expected}')
     print('patched units:',', '.join(sorted(set(changed))) if changed else 'none (already patched)',counts)
 

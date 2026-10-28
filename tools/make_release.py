@@ -26,7 +26,7 @@ Package contents:
   third_party/ffmpeg                  FFmpeg libraries (LGPL) and licence
   config/
 """
-import argparse, hashlib, json, re, shutil, zipfile
+import argparse, hashlib, json, re, shutil, subprocess, sys, zipfile
 from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 BUILD = ROOT / 'build/native_full'
@@ -34,6 +34,12 @@ ZIG = ROOT / 'third_party/toolchain/zig-x86_64-windows-0.15.2'
 ZIG_VERSION = '0.15.2'
 PYTHON = ROOT / 'third_party/python_embed/py'
 PYTHON_VERSION = '3.12.10'
+# Exact LGPL libraries shipped in third_party/ffmpeg/bin (SEC-2): version and
+# corresponding source, so the package carries the offer the licence requires.
+FFMPEG_VERSION = 'n8.1.3-14-g330caae0c1-20261003'
+FFMPEG_COMMIT = '330caae0c1acccd2222edc52a05940c574561ce5'
+FFMPEG_SOURCE = f'https://github.com/FFmpeg/FFmpeg/tree/{FFMPEG_COMMIT}'
+FFMPEG_BUILD = 'https://github.com/BtbN/FFmpeg-Builds'
 NAME = 'K-On Houkago Live Recompiled'
 
 README = '''K-On! Houkago Live!! Recompiled {version} (Windows)
@@ -84,7 +90,10 @@ PROBLEMAS
 
 LICENCIAS
 recomp\\zig: MIT. recomp\\python: PSF. recomp\\include: PSPRecomp (MIT).
-tools\\pspdecrypt.exe: GPLv3. third_party\\ffmpeg: LGPL.
+tools\\pspdecrypt.exe: GPLv3 (codigo fuente en su LEEME).
+third_party\\ffmpeg: LGPL v3. Version exacta {ffmpeg} (compilacion BtbN
+FFmpeg-Builds, win64-lgpl-shared). Codigo fuente correspondiente:
+{ffmpeg_source}
 K-On! y Houkago Live!! son de sus propietarios; este proyecto no tiene relacion
 con ellos y no incluye ningun contenido del juego.
 '''
@@ -122,6 +131,15 @@ def write_zip(archive, out, skip=()):
                 z.write(f, Path(out.name) / rel)
     print(f'Zip: {archive.name} ({archive.stat().st_size // 1048576} MB)')
 
+def audit_release(paths):
+    """Nothing is releasable until the publication audit passes (SEC-5)."""
+    audit = ROOT / 'tools/audit_public.py'
+    for path in paths:
+        print(f'Publication audit: {path}')
+        result = subprocess.run([sys.executable, str(audit), '--release', str(path), '--quiet'], cwd=ROOT)
+        if result.returncode != 0:
+            raise SystemExit(f'Publication audit FAILED for {path}; the package is not releasable.')
+
 def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument('--out', type=Path, default=ROOT / 'dist/release')
@@ -157,17 +175,33 @@ def main():
     for dll in ('avutil-60.dll', 'avcodec-62.dll', 'avformat-62.dll', 'swresample-6.dll'):
         shutil.copy2(ROOT / 'third_party/ffmpeg/bin' / dll, media / dll)
     shutil.copy2(ROOT / 'third_party/ffmpeg/LICENSE.txt', out / 'third_party/ffmpeg/LICENSE.txt')
+    (out / 'third_party/ffmpeg/README.txt').write_text(
+        'FFmpeg shared libraries used by K-On! Houkago Live!! Recompiled.\n\n'
+        f'Version: {FFMPEG_VERSION} (8.1 branch)\n'
+        'Libraries: avutil-60, avcodec-62, avformat-62, swresample-6\n'
+        'Binary build: BtbN FFmpeg-Builds, ffmpeg-n8.1-latest-win64-lgpl-shared-8.1.zip\n'
+        f'Build scripts: {FFMPEG_BUILD}\n'
+        'Licence: LGPL v3 (see LICENSE.txt in this folder).\n\n'
+        'Corresponding source code of these libraries:\n'
+        f'  {FFMPEG_SOURCE}\n', encoding='utf-8')
     (out / 'config').mkdir()
-    (out / 'LEEME.txt').write_text(README.format(version=ver).replace('\n', '\r\n'), encoding='utf-8')
+    (out / 'LEEME.txt').write_text(README.format(version=ver, ffmpeg=FFMPEG_VERSION,
+                                                 ffmpeg_source=FFMPEG_SOURCE).replace('\n', '\r\n'), encoding='utf-8')
     manifest = {'version': ver, 'toolchain': f'zig {ZIG_VERSION}; python {PYTHON_VERSION}'}
     (out / 'manifest.json').write_text(json.dumps(manifest, indent=2), encoding='utf-8')
     print(f'Package in {out} (version {ver})')
+    audited = [out]
     if not a.no_zip:
         stem = f'K-On.Houkago.Live.Recompiled-v{ver}'
-        write_zip(a.out / f'{stem}-windows.zip', out)
-        write_zip(a.out / f'{stem}-actualizacion.zip', out, skip=('recomp/zig/', 'recomp/python/'))
+        full_zip = a.out / f'{stem}-windows.zip'
+        update_zip = a.out / f'{stem}-actualizacion.zip'
+        write_zip(full_zip, out)
+        write_zip(update_zip, out, skip=('recomp/zig/', 'recomp/python/'))
+        audited += [full_zip, update_zip]
         # Uploaded with the zips: the launcher compares its toolchain with the installed one.
         shutil.copy2(out / 'manifest.json', a.out / 'manifest.json')
+    # SEC-5: the package is not releasable if the publication audit finds anything.
+    audit_release(audited)
 
 if __name__ == '__main__':
     main()

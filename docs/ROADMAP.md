@@ -1,6 +1,6 @@
 # Roadmap de K-On! Hōkago Live!! para PC
 
-Actualizado: 2026-10-08 (sesión de Claude).
+Actualizado: 2026-10-25 (sesión de Claude). Tareas pendientes organizadas en [BACKLOG.md](BACKLOG.md).
 
 **Objetivo:** el juego original completo como port nativo de Windows. Un único `.exe` con selección automática de GPU (AMD Radeon 780M y NVIDIA RTX 5050), japonés e inglés seleccionables en Ajustes, estructura para añadir español y otros idiomas sin recompilar, resolución interna superior, FPS elegibles (30/60/120/165/personalizado) sin acelerar el juego, mando y teclado configurables, y mods de recursos sin editar las ISO.
 
@@ -200,7 +200,7 @@ Confirmado por el usuario: los mandos de Xbox funcionan y la interfaz cambia a s
     - Prueba del transporte por el relé (`native_adhoc_loopback`): 3 jugadores, PDP unicast y difusión, PTP en ambos sentidos, rechazo, cierre y salida de la sala; además, códigos y análisis UPnP.
     - Dos instancias del juego con el descubrimiento UDP desactivado (`KON_ADHOC_RELAY_ONLY`) formaron la banda por el relé y tocaron Hotchkiss juntas, con la misma BAND SCORE en las dos: 47 653 (Mio 33 540, Yui 40 290).
     - Repetido con 150 ms de ida y vuelta simulados (`KON_RELAY_DELAY_MS=75`): misma BAND SCORE, 48 668.
-  - Paquete para otro jugador (`tools/make_friend_package.py`, ZIP de 59 MB sin datos del juego). `INSTALAR.cmd` instala desde su propia ISO: elegida en una ventana o arrastrada, japonesa o inglesa, basta una.
+  - Paquete para otro jugador (`tools/make_friend_package.py`, ZIP de 59 MB sin datos del juego; retirado después: lo sustituye el paquete de release de `tools/make_release.py`, punto 9). `INSTALAR.cmd` instala desde su propia ISO: elegida en una ventana o arrastrada, japonesa o inglesa, basta una.
     - El propio ejecutable lee la ISO, comprueba `std.cpk` y el EBOOT por SHA-256, descifra el EBOOT y comprueba el programa.
     - Verificado con las ISO del usuario: instalación solo inglesa (llega hasta la selección de objeto de la canción) y solo japonesa (arranca en japonés).
     - Con un solo disco, la columna de idioma de Ajustes queda fija.
@@ -239,14 +239,65 @@ Confirmado por el usuario: los mandos de Xbox funcionan y la interfaz cambia a s
     - Contra el Discord real de este PC, un ID inválido recibe «4000 Invalid Client ID», es decir, el protocolo llega.
     - En el juego (copia privada) la actividad sigue la partida: club 32 s → menús 43 s → «Playing Watashi no Koi wa Hotchkiss · Solo · Yui (lead guitar)» 79 s → resultados → menús con «N songs played».
 
-### 9. Versión 0.1.0 para publicar (10 de octubre) — HECHO, falta publicar la release
+### 9. Versión 0.1.0 publicada (10 de octubre) — HECHO
 
 - [x] ~~**El paquete no lleva nada del juego** (ni datos ni código), como Ship of Harkinian: `K-On Houkago Live Recompiled.exe` (`src/launcher.cpp`) instala la ISO del jugador, traduce su ejecutable con `psp_recomp`, aplica el parche de FPS con un Python portátil, compila con zig y enlaza con el código propio del port (biblioteca `kon_host`). Todo dentro de la carpeta elegida (`recomp/`, `recomp_cache/`, `bin/`, partidas y ajustes). Sin `.cmd`.~~
   - Verificado en la 780M: instalación limpia de las dos ISO en 5 min; la traducción es idéntica al corpus de desarrollo y los 127 objetos tienen las mismas secciones de código y datos; el juego creado pasa el arranque JA/EN y toca Hotchkiss.
 - [x] ~~**Actualizaciones automáticas** desde las releases de `EDGX73/KOn-Houkago-Live-Recompiled` (`src/native_update.hpp`): descarga solo el paquete pequeño si el compilador no cambió y reconstruye de forma incremental (2 s si solo cambia el port).~~ Verificado con un servidor local que publicaba una 0.1.1: la 0.1.0 instalada pasó a 0.1.1 (lanzador y juego) conservando partidas.
 - [x] ~~**Versión 0.1.0** (`src/kon_version.h`) en el título, F1, F8, Discord y propiedades del exe.~~
 - [x] ~~Paquete sin datos personales: compilado sin información de depuración (las bibliotecas llevaban rutas de este PC); comprobado buscando el usuario, el nombre y el correo en todos los archivos.~~
-- [ ] Publicar el repositorio y la release 0.1.0 en GitHub (cuenta del usuario) y probar una actualización real.
+- [x] ~~Publicado por el usuario: https://github.com/EDGX73/KOn-Houkago-Live-Recompiled (público, un commit con la dirección anónima de GitHub) y la release `v0.1.0` con los tres archivos; sus SHA-256 coinciden con los de `dist/release` y el actualizador del juego lee la release real (encuentra los tres archivos y el manifiesto, y no ofrece actualizar a la misma versión).~~
+- [ ] Probar una actualización real desde GitHub con la próxima versión.
+- Siguientes versiones: subir `KON_VERSION_*` en `src/kon_version.h`, compilar, `python tools/make_release.py`, `python tools/export_public.py "<mensaje>"` (copia pública sin notas internas ni datos personales), `git push` desde `dist/github/KOn-Houkago-Live-Recompiled` y una release `vX.Y.Z` con los tres archivos (sin marcar pre-release). Proceso completo y controles: [PUBLICACION.md](PUBLICACION.md).
+
+### 10. Publicación segura y desarrollo coordinado (20 de octubre) — EN CURSO
+
+- [x] ~~**Problema encontrado:** GitHub no tenía los 8 archivos modificados de PSPRecomp (el `.gitignore` público ignora `third_party/` y la exportación usaba `git add -A`): desde el código publicado no se podía reconstruir el framework del port.~~ Ahora se publican como `patches/psprecomp/kon-port.patch` (MIT, licencia incluida) y `tools/psprecomp_patch.py fetch` lo aplica sobre la revisión fijada `f6e7d41`. Verificado: el parche, aplicado a un clon limpio de upstream, reproduce los 8 archivos (8/8 idénticos salvo fin de línea); `fetch` es idempotente.
+- [x] ~~**Problema encontrado:** `tools/build_framework.ps1` fallaba desde el 6 de octubre (`add_scratchpad_memory.py`: «Pinned source mismatch» tras los cambios manuales de `guest_memory.cpp`; el último uso fue el 4 de octubre).~~ Ahora obtiene PSPRecomp con el parche y ya no ejecuta los cinco scripts antiguos (conservados como historial en `docs/PROCEDENCIA.md`).
+- [x] ~~Auditoría de publicación `tools/audit_public.py` (formatos, nombres y hashes del juego, código traducido, datos personales, rutas de perfil, secretos, identidad de los commits, estructura del paquete) con excepciones justificadas en `tools/audit_allowlist.json`. Controles negativos: el ELF descifrado, una unidad generada, el ejecutable de desarrollo (código del juego), `ICON0.PNG`, `PARAM.SFO` y una partida quedan bloqueados.~~
+- [x] ~~Exportación nueva (`tools/export_public.py`): solo `HEAD`, comprueba que GitHub no tenga commits sin importar, audita en carpeta temporal antes de tocar la copia pública, fuerza el registro de cada archivo exportado, `--dry-run`, archivos solo públicos desde `public_overlay/`.~~
+- [x] ~~Hooks locales (`tools/install_hooks.py` → `tools/git_hook.py`): `pre-push` del repositorio privado siempre rechaza; `pre-commit` y `pre-push` de la copia pública auditan. Probados: un commit limpio pasa; uno con ruta de perfil y correo real se bloquea en los dos.~~
+- [x] ~~Importación de lo fusionado en GitHub (`tools/import_public.py`), workflow de auditoría para GitHub Actions, [BACKLOG.md](BACKLOG.md), pruebas `tools/tests/test_publication.py` (20 pruebas de herramientas con datos; 15 sin datos, como en CI).~~
+- [x] ~~**Auditoría de la release v0.1.0:** los tres archivos publicados coinciden byte a byte (SHA-256 de GitHub) con `dist/release`; 16.149 archivos revisados sin datos ni código del juego, datos personales ni secretos (detalle en [PUBLICACION.md](PUBLICACION.md)).~~
+- [x] ~~**REA** ([REA.md](REA.md)): 6.7.0 instalado en `third_party/rea` y registrado en Claude Code con alcance local (estado *Connected*). Comprobado: en Windows REA no admite ELF MIPS (solo PE y 6502); su perfil PSP exige Linux, ET_EXEC y un registro ABI, y el ejecutable del juego es un PRX. `tools/psp_prx_to_exec.py` crea una copia ET_EXEC en 0x08804000 cuyas 118.256 reubicaciones dan los mismos 3.068.424 bytes que PSPRecomp (`src/prx_image_dump.cpp`) y que la propia función de admisión de REA acepta.~~ Falta WSL2 con Ghidra 12.1.3 y ghidra-allegrex v21.4 (permiso del usuario).
+- [x] ~~**Android, primera evidencia** ([ANDROID.md](ANDROID.md)): el corpus del juego (127 unidades) y el núcleo de PSPRecomp compilan para aarch64 sin errores (zig, -O2, 195 s); 32 de 42 pruebas del runtime compilan para aarch64-linux (`tools/portability_probe.py`). Solo compilación: sin enlazar ni ejecutar en ARM. JDK 21 portable instalado.~~ SDK/NDK pendientes de aceptar la licencia del SDK.
+- [x] ~~**Capa de plataforma, primera fase (AND-1)** ([ANDROID.md](ANDROID.md) §2): bibliotecas dinámicas, espera, calendario, energía, archivos y guardado, imágenes de mods (decodificador PNG propio fuera de Windows: 41 comparaciones bit a bit con WIC y 12 de 16 bits a una unidad), red, audio (`PcmOutput`), teclado y mandos, Discord y auriculares en `src/platform/`; Windows hace las mismas llamadas que antes. Verificado con el binario `6bf78e1b` (AMD 780M): 42/42 pruebas; las cuatro suites Vulkan; canción completa de Hotchkiss en silencio a 165 FPS con la semilla y las entradas de la ejecución `song_end2` del 8 oct. (binario `44faece7`): rango S y PERFECT CLEARED en las dos (53 790 antes, 54 190 ahora: las entradas sintéticas varían entre ejecuciones), objetos, autoguardado, mismo evento posterior, música con las mismas 4 905 728 muestras reproducidas, 0 huecos y 0 vaciados; tramo de 1 a 5 s a 164,4 FPS (antes 164,9). aarch64: 41/43 pruebas y 7/9 archivos del runtime compilan.~~ Falta la ventana/OSK, la presentación, el proceso y el lanzador.
+- [ ] Primer push de la exportación nueva (usuario).
+
+### 11. Versión 0.1.1 (25 de octubre) — no publicada
+
+Cambios de mantenimiento preparados; no hubo release `v0.1.1`.
+
+- [x] Versión subida a 0.1.1 en `src/kon_version.h` (título, F1, F8, Discord y propiedades del exe).
+- [x] SEC-2 hecho: el paquete incluye la versión exacta de FFmpeg y el enlace a su código fuente (LGPL).
+- [x] SEC-5 hecho: `tools/make_release.py` ejecuta `tools/audit_public.py --release` sobre la carpeta y los dos ZIP, y aborta si falla.
+- [x] Ayuda F1 rediseñada: la fuente y el panel escalan con la resolución interna y el texto se ajusta; antes era un mapa de 372×248 con texto de 5 px a 1088p.
+- [x] Corregida la ayuda F1 y `docs/CONTROLES.md`: afirmaban que ○ confirma siempre; al jugar en inglés la barra del juego muestra «✕ Enter / ○ Back» y Z arranca la canción. Ahora la ayuda es neutral y la guía explica la diferencia EN/JA.
+- [x] Ayuda F1 con tildes y direcciones del stick; ventana F8 con avisos al copiar sin sala y al unirse vacío (verificado en el juego); errores de instalación/actualización con instrucciones; ayuda de idioma con un solo disco.
+- [x] Errores de conexión y router traducidos al español; ventana F8 ampliada (560×430) para que quepan más códigos y avisos.
+- [ ] G-1 (texturas 3D ampliadas) probado y descartado por ahora: con `KON_UPSCALE_3D=1` a 4×, la ventana 1–5 s de la canción bajó de 160,3 a 130,9 FPS a 1088p; la mejora visual no compensa. Queda probar 2× o un umbral de tamaño.
+- [ ] G-2 parcial: volcado de 40 texturas (título, carga, sala, selector de canción y hub del álbum) y escaneo de 24 badges, todos ya en la tabla; 0 nuevos. Faltan las cinco secciones del álbum, OPTION, guardado real e historia. `glyph_scan.py` ahora tolera volcados parciales y `--list` sin atlas de referencia.
+- [x] Compilación y pruebas: 42/42 pruebas, cuatro suites Vulkan AMD (352 comparaciones de VRAM completa) y 20/20 pruebas de herramientas (25 oct.).
+- [x] Resultados comprobados con el binario nuevo (Hotchkiss, sin entradas de nota): NO RANK / TOO BAD, Perfect 0, Great 0, Good 0, Bad 0, Miss 11, Max Combo 0 y TOTAL SCORE 0, todos visibles. La captura anterior sin cifras era el frame de entrada, no un fallo.
+- [x] Arranque JA/EN con el binario final (`check_native_boot.py`: PASS) y ayuda F1 revisada visualmente a 1088p en ventana: panel, fuente y versión 0.1.1 legibles (antes, ~5 px).
+- [x] Paquete 0.1.1 generado (windows 132 MB, actualización 50 MB) con auditoría automática y explícita: 0 hallazgos y 0 avisos en 8.059/8.060/32 archivos; hashes conservados localmente. No hubo release.
+- [ ] Push y release `v0.1.1`: no realizado; no existe release `v0.1.1`.
+
+### 12. Versión 0.2.0 (26 de octubre) — EN CURSO
+
+Trabajo de la 0.2: APK Android, actualizaciones y los fallos visuales/tiempos
+reportados. Nada de esta sección se considera entregado hasta que tenga
+evidencia con el binario/APK final.
+
+- [x] Versión de desarrollo 0.2.0 en `src/kon_version.h`.
+- [x] Android fase 0: toolchain NDK 28.2, núcleo 8/8 y corpus 127/127 para `arm64-v8a` (API 26), enlazados; probe sin ventana ejecutado en el emulador x86_64 (116.167 funciones, entrada `0x08804000` resuelta).
+- [x] Glifos: CHECK! conserva el aro, la X del cartel «PUSH» queda dentro del círculo, badges centrados y pastillas con margen; el test de glifos genera las 20 variantes y las notas no cambian. Evidencia: 42/42 y `work/glyph_check`.
+- [x] Menú de canciones: espera corregida. El contador `[+64] = 1×fps` de `0x0886B128` se decrementaba con `kon_logic_step30`; ahora usa 30. Medido: tramo verde ~1 s y lista a 44,5 s a 165 FPS (antes 48,5 s); 42/42.
+- [x] APK Android base 0.2.0 local (27 oct.): `dist/android/KOn-Houkago-Live-Recompiled-0.2.0-android.apk`, 1,54 MB, `com.edgx73.konrecompiled`, versionCode 200/0.2.0, minSdk 26/target 36, arm64-v8a + x86_64, firmada v2/v3 y sin datos ni código del juego; actualizador, exportación/importación de partidas y diagnóstico. **No es jugable por sí sola y no está publicada.**
+- [x] APK Android arm64 jugable (28 oct.): runtime y preparación en el dispositivo desde la ISO por SAF, controles táctiles, mandos, AAudio y guardado. El usuario la probó en un Samsung Galaxy S24: funciona con rendimiento mejorable y menos opciones que PC. **Retenida para publicación** hasta acreditar la procedencia y licencias de componentes de terceros. No se publica.
+- [x] Menú de actualizaciones del lanzador Windows: diálogo propio (`src/update_dialog.hpp`), `--check-updates`, comctl32 y descarga/instalación en hilo aparte; el lanzador compila. Prueba local 0.2.0→0.2.1 superada; falta la prueba real desde GitHub.
+- [x] Integración del juego en Android (ventana, `VK_KHR_android_surface`, AAudio, entrada táctil/mandos, SAF de la ISO y preparación en el dispositivo): implementada en la candidata arm64 probada por el usuario; quedan rendimiento y opciones.
+- [ ] Paquete 0.2.0 de Windows y APK Android: no publicados. La auditoría previa no cubre la procedencia de todos los componentes de terceros ni todas sus obligaciones; no hay `SHA256SUMS.txt` final ni release `v0.2.0`.
 
 ---
 

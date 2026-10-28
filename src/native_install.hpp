@@ -85,7 +85,7 @@ inline std::vector<std::filesystem::path> choose_isos(){
 inline int install_from_isos(std::filesystem::path root,std::vector<std::filesystem::path> isos){
     try{
         if(isos.empty()){std::cout<<"Elige tu ISO en la ventana que se ha abierto...\n";isos=choose_isos();}
-        if(isos.empty()){std::cout<<"No se eligió ninguna ISO.\n";return 1;}
+        if(isos.empty()){std::cout<<"No se eligió ninguna ISO. Abre el juego otra vez y elige tu ISO (o arrástrala sobre el .exe).\n";return 1;}
         const auto extracted=root/"analysis"/"extracted";
         for(const auto& iso:isos){
             std::cout<<"\nLeyendo "<<iso.filename().string()<<"...\n";
@@ -118,13 +118,13 @@ inline int install_from_isos(std::filesystem::path root,std::vector<std::filesys
             std::cout<<"Descifrando el programa del juego...\n";
             std::filesystem::create_directories(elf.parent_path());
             const auto tool=root/"tools"/"pspdecrypt.exe";
-            if(!std::filesystem::is_regular_file(tool))throw std::runtime_error("Falta tools\\pspdecrypt.exe junto al juego");
+            if(!std::filesystem::is_regular_file(tool))throw std::runtime_error("Falta tools\\pspdecrypt.exe junto al juego. Vuelve a descomprimir el paquete completo");
             const auto eboot=extracted/(jp?"jp":"en")/"PSP_GAME/SYSDIR/EBOOT.BIN";
             std::wstring command=L"\""+tool.wstring()+L"\" \""+eboot.wstring()+L"\" -o \""+elf.wstring()+L"\"";
             STARTUPINFOW si{};si.cb=sizeof si;si.dwFlags=STARTF_USESHOWWINDOW;si.wShowWindow=SW_HIDE;PROCESS_INFORMATION pi{};
             if(!CreateProcessW(nullptr,command.data(),nullptr,nullptr,FALSE,CREATE_NO_WINDOW,nullptr,root.wstring().c_str(),&si,&pi))throw std::runtime_error("No se pudo ejecutar pspdecrypt");
             WaitForSingleObject(pi.hProcess,INFINITE);CloseHandle(pi.hThread);CloseHandle(pi.hProcess);
-            if(!std::filesystem::is_regular_file(elf) || psprecomp::sha256_file(elf)!=kElfSha)throw std::runtime_error("El programa descifrado no es el esperado");
+            if(!std::filesystem::is_regular_file(elf) || psprecomp::sha256_file(elf)!=kElfSha)throw std::runtime_error("El programa descifrado no es el esperado. Usa la ISO original ULJM05709 o la traducción inglesa sin modificar");
         }
         // Only the Japanese disc: start in Japanese (the language can be changed in Settings when both are installed).
         const auto settings=root/"config"/"settings.ini";
@@ -133,6 +133,6 @@ inline int install_from_isos(std::filesystem::path root,std::vector<std::filesys
             std::ofstream(settings,std::ios::trunc)<<text<<"language=ja\n";}
         std::cout<<"\nDisco instalado"<<(jp && en?" (idioma: Ajustes > Video).":".")<<"\nPara jugar online: dentro del juego pulsa F8.\n";
         return 0;
-    }catch(const std::exception& e){std::cout<<"\nERROR: "<<e.what()<<"\nNo se ha completado la instalación.\n";return 1;}
+    }catch(const std::exception& e){std::cout<<"\nERROR: "<<e.what()<<"\nNo se ha completado la instalación. Si vuelve a pasar, adjunta este mensaje en un issue.\n";return 1;}
 }
 }

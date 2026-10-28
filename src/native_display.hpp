@@ -8,6 +8,7 @@
 #ifdef KON_HAS_NATIVE_VULKAN
 #include "native_vulkan_present.hpp"
 #endif
+#ifdef _WIN32
 #ifndef NOMINMAX
 #define NOMINMAX
 #endif
@@ -15,6 +16,7 @@
 #define WIN32_LEAN_AND_MEAN
 #endif
 #include <windows.h>
+#endif
 #include <algorithm>
 #include <thread>
 #include <mutex>
@@ -30,6 +32,9 @@
 #include <functional>
 #include <stdexcept>
 #include <vector>
+#ifndef _WIN32
+#include "native_display_android.hpp"
+#endif
 namespace kon {
 inline std::uint32_t psp_pixel_bgra(std::uint32_t pixel,unsigned format) {
     unsigned r,g,b,a;
@@ -44,6 +49,7 @@ inline std::uint32_t psp_pixel_bgra(std::uint32_t pixel,unsigned format) {
 // The window, its message loop and all GDI painting run on a dedicated
 // presentation thread, so painting never delays original game code. The game
 // thread only hands over finished pixel buffers and reads keyboard bits.
+#ifdef _WIN32
 class NativeWindow {
 public:
     // Process-wide presentation settings, set once before the window exists.
@@ -66,7 +72,7 @@ public:
         std::unique_lock lock(mutex_);ready_cv_.wait(lock,[this]{return ready_;});
         if(!window_){lock.unlock();thread_.join();throw std::runtime_error("Cannot create native game window");}
     }
-    ~NativeWindow(){if(const auto w=window_.load())PostMessageW(w,WM_APP+1,0,0);if(thread_.joinable())thread_.join();}
+    ~NativeWindow(){if(const auto w=window_.load())PostMessageW(w,WM_APP+1,0,0);if(thread_.joinable())thread_.join();release_overlay();}
     void pump(){} // the presentation thread owns the message loop
     bool closed() const{return closed_.load();}
     bool minimized() const{const auto w=window_.load();return w && IsIconic(w);}
@@ -194,7 +200,7 @@ private:
         using GetDpi=UINT(WINAPI*)(HWND);unsigned dpi=96;
         if(const auto get=reinterpret_cast<GetDpi>(GetProcAddress(GetModuleHandleW(L"user32.dll"),"GetDpiForWindow")))dpi=std::max(96u,get(parent));
         const auto px=[dpi](int v){return MulDiv(v,int(dpi),96);};
-        const int width=px(520),height=px(370);RECT game{};GetWindowRect(parent,&game);
+        const int width=px(560),height=px(430);RECT game{};GetWindowRect(parent,&game);
         online_box_=CreateWindowExW(WS_EX_TOPMOST|WS_EX_DLGMODALFRAME,L"KonOnline",L"Jugar online (F8) - v" KON_VERSION_WIDE,WS_POPUP|WS_CAPTION|WS_SYSMENU,
             (game.left+game.right-width)/2,(game.top+game.bottom-height)/2,width,height,parent,nullptr,instance,this);
         if(!online_box_)return;
@@ -236,7 +242,7 @@ private:
             const auto id=LOWORD(w);
             if(id==301)self->online_call(OnlineAction::Host);
             else if(id==303 || id==IDOK){std::wstring code(std::size_t(GetWindowTextLengthW(self->online_edit_))+1u,L'\0');code.resize(std::size_t(GetWindowTextW(self->online_edit_,code.data(),int(code.size()))));
-                if(!code.empty())self->online_call(OnlineAction::Join,code);}
+                self->online_call(OnlineAction::Join,code);}
             else if(id==304)copy_to_clipboard(hwnd,self->online_call(OnlineAction::Code));
             else if(id==305)self->online_call(OnlineAction::Leave);
             else if(id==IDCANCEL){self->close_online();return 0;}
@@ -289,35 +295,94 @@ private:
         }
         if(factor==1)std::memcpy(compose_bits_,pixels_.data(),std::size_t(width)*height*4u);
         else for(int y=0;y<height;++y){const auto* in=&pixels_[std::size_t(y/2)*width_];auto* out=compose_bits_+std::size_t(y)*width;for(int x=0;x<width;++x)out[x]=in[x/2];}
-        draw_overlay(compose_dc_);GdiFlush();
+        draw_overlay(compose_dc_,width,height);GdiFlush();
         try{vulkan_->present(compose_bits_,unsigned(width),unsigned(height),true);return true;}
         catch(const std::exception& error){vulkan_.reset();std::lock_guard lock(mutex_);presenter_name_=std::string("gdi (vulkan failed: ")+error.what()+")";return false;}
     }
 #endif
-    // Overlay boxes copied onto an image (drawn once into a small bitmap).
-    HDC overlay_dc_=nullptr;HBITMAP overlay_bitmap_=nullptr;std::uint32_t* overlay_bits_=nullptr;static constexpr int kOverlayWidth=372,kOverlayHeight=248;
+    // Overlay boxes copied onto an image. The layout scales with the target:
+    // the original fixed 372x248 bitmap left 5 px text at 1088p.
+    HDC overlay_dc_=nullptr;HBITMAP overlay_bitmap_=nullptr;std::uint32_t* overlay_bits_=nullptr;
+    int overlay_width_=0,overlay_height_=0;HFONT overlay_font_=nullptr;int overlay_font_height_=0;
     bool direct_frame_=false; // the last frame went straight to the Vulkan upload memory
-    void overlay_into(std::uint32_t* image,unsigned width,unsigned height){
-        if(!overlay_dc_){BITMAPINFO info{};info.bmiHeader.biSize=sizeof(BITMAPINFOHEADER);info.bmiHeader.biWidth=kOverlayWidth;info.bmiHeader.biHeight=-kOverlayHeight;info.bmiHeader.biPlanes=1;info.bmiHeader.biBitCount=32;info.bmiHeader.biCompression=BI_RGB;
-            overlay_dc_=CreateCompatibleDC(nullptr);void* bits=nullptr;overlay_bitmap_=CreateDIBSection(overlay_dc_,&info,DIB_RGB_COLORS,&bits,nullptr,0);
-            if(!overlay_dc_ || !overlay_bitmap_ || !bits)return;SelectObject(overlay_dc_,overlay_bitmap_);overlay_bits_=static_cast<std::uint32_t*>(bits);}
-        if(!overlay_bits_)return;
-        draw_overlay(overlay_dc_);GdiFlush();
-        const auto copy=[&](int left,int top,int right,int bottom){
-            for(int y=top;y<std::min(bottom,int(height));++y){const int w=std::min(right,int(width))-left;if(w>0)std::memcpy(image+std::size_t(y)*width+left,overlay_bits_+std::size_t(y)*kOverlayWidth+left,std::size_t(w)*4u);}
-        };
-        if(show_fps().load())copy(8,8,130,36);if(show_controls_)copy(8,42,370,246);
+    struct OverlayRects{RECT fps{};RECT help{};};
+    static const wchar_t* overlay_line(int index){
+        static const wchar_t* lines[]{L"CONTROLES PSP - F1: mostrar / ocultar",L"Flechas: cruceta   |   Stick: I arriba, K abajo, J izquierda, L derecha",L"S: Triángulo    X: Círculo",L"Z: Cruz         A: Cuadrado",L"Q: L            W: R",L"Enter: START    Retroceso: SELECT",L"Cruz (Z) y Círculo (X): confirmar / volver; lo indica el juego.",L"F11 o Alt+Intro: pantalla completa",L"F8: jugar online (crear sala o unirse con un código)",L"F3: mostrar / ocultar los FPS",L"La ventana debe tener el foco.",L"K-On! Houkago Live!! Recompiled v" KON_VERSION_WIDE};
+        return index>=0 && index<12?lines[index]:L"";
     }
-    void draw_overlay(HDC dc){
-        SetBkMode(dc,TRANSPARENT);SelectObject(dc,GetStockObject(DEFAULT_GUI_FONT));
-        if(show_fps().load()){RECT overlay{8,8,130,36};FillRect(dc,&overlay,static_cast<HBRUSH>(GetStockObject(BLACK_BRUSH)));
-            SetTextColor(dc,RGB(120,255,120));TextOutW(dc,14,14,fps_text_,static_cast<int>(std::wcslen(fps_text_)));}
-        if(show_controls_){
-            RECT help{8,42,370,310};FillRect(dc,&help,static_cast<HBRUSH>(GetStockObject(BLACK_BRUSH)));
-            SetTextColor(dc,RGB(255,255,255));
-            const wchar_t* lines[]{L"CONTROLES PSP - F1: mostrar / ocultar",L"Flechas: cruceta   |   I J K L: stick analogico",L"S: Triangulo    X: Circulo",L"Z: Cruz         A: Cuadrado",L"Q: L            W: R",L"Enter: START    Retroceso: SELECT",L"Circulo confirma; Cruz vuelve, segun el juego.",L"F11 o Alt+Intro: pantalla completa",L"F8: jugar online (crear sala o unirse con un codigo)",L"F3: mostrar / ocultar los FPS",L"La ventana debe tener el foco.",L"K-On! Houkago Live!! Recompiled v" KON_VERSION_WIDE};
-            int y=50;for(const auto line:lines){TextOutW(dc,16,y,line,static_cast<int>(std::wcslen(line)));y+=21;}
+    static std::wstring overlay_text(){std::wstring text;for(int i=0;i<12;++i){if(i)text+=L'\n';text+=overlay_line(i);}return text;}
+    static double overlay_scale(int width,int height){return std::max(1.0,std::min(width/480.0,height/272.0));}
+    static int overlay_font_px(double scale,int height){return std::max(11,std::min(int(11*scale),int(height/18)));}
+    HFONT overlay_font(int height){
+        if(overlay_font_ && overlay_font_height_==height)return overlay_font_;
+        if(overlay_font_){DeleteObject(overlay_font_);overlay_font_=nullptr;}
+        overlay_font_=CreateFontW(-height,0,0,0,FW_NORMAL,FALSE,FALSE,FALSE,DEFAULT_CHARSET,OUT_DEFAULT_PRECIS,CLIP_DEFAULT_PRECIS,CLEARTYPE_QUALITY,DEFAULT_PITCH,L"Segoe UI");
+        overlay_font_height_=height;return overlay_font_;
+    }
+    OverlayRects overlay_layout(HDC dc,int width,int height){
+        const double scale=overlay_scale(width,height);
+        const int margin=std::max(4,int(8*scale)),pad=std::max(4,int(8*scale));
+        const int font=overlay_font_px(scale,height),fps_w=std::min(width-2*margin,int(122*scale)),fps_h=font+std::max(4,int(6*scale));
+        OverlayRects rects;
+        rects.fps={margin,margin,margin+fps_w,margin+fps_h};
+        const int help_top=rects.fps.bottom+std::max(4,int(6*scale));
+        const int panel_w=std::min(width-2*margin,std::max(int(372*scale),width*3/5));
+        RECT calc{0,0,panel_w-2*pad,0};
+        const auto font_handle=overlay_font(font);
+        const auto old_font=font_handle?SelectObject(dc,font_handle):nullptr; // measured with the final font
+        const auto text=overlay_text();
+        DrawTextW(dc,text.c_str(),-1,&calc,DT_CALCRECT|DT_WORDBREAK|DT_NOPREFIX);
+        if(old_font)SelectObject(dc,old_font);
+        const int panel_h=std::max(font,int(std::min<long>(height-help_top-margin,calc.bottom+2*pad)));
+        rects.help={margin,help_top,margin+panel_w,help_top+panel_h};
+        return rects;
+    }
+    OverlayRects draw_overlay(HDC dc,int width,int height){
+        SetBkMode(dc,TRANSPARENT);
+        const double scale=overlay_scale(width,height);const int font=overlay_font_px(scale,height),pad=std::max(4,int(8*scale));
+        const auto old_font=overlay_font(font)?SelectObject(dc,overlay_font_):nullptr;
+        const auto rects=overlay_layout(dc,width,height);
+        if(show_fps().load()){
+            FillRect(dc,&rects.fps,static_cast<HBRUSH>(GetStockObject(BLACK_BRUSH)));
+            SetTextColor(dc,RGB(120,255,120));
+            RECT text=rects.fps;text.left+=pad;
+            DrawTextW(dc,fps_text_,-1,&text,DT_LEFT|DT_VCENTER|DT_SINGLELINE|DT_NOPREFIX);
         }
+        if(show_controls_){
+            FillRect(dc,&rects.help,static_cast<HBRUSH>(GetStockObject(BLACK_BRUSH)));
+            FrameRect(dc,&rects.help,static_cast<HBRUSH>(GetStockObject(GRAY_BRUSH)));
+            RECT area=rects.help;area.left+=pad;area.top+=pad;area.right-=pad;area.bottom-=pad;
+            SetTextColor(dc,RGB(255,255,255));
+            const auto text=overlay_text();
+            DrawTextW(dc,text.c_str(),-1,&area,DT_LEFT|DT_TOP|DT_WORDBREAK|DT_NOPREFIX);
+        }
+        if(old_font)SelectObject(dc,old_font);
+        return rects;
+    }
+    void release_overlay(){
+        if(overlay_dc_ && overlay_bitmap_){SelectObject(overlay_dc_,GetStockObject(DEFAULT_GUI_FONT));DeleteObject(overlay_bitmap_);}
+        if(overlay_dc_)DeleteDC(overlay_dc_);
+        overlay_dc_=nullptr;overlay_bitmap_=nullptr;overlay_bits_=nullptr;overlay_width_=overlay_height_=0;
+        if(overlay_font_){DeleteObject(overlay_font_);overlay_font_=nullptr;overlay_font_height_=0;}
+    }
+    void overlay_into(std::uint32_t* image,unsigned width,unsigned height){
+        if(int(width)!=overlay_width_ || int(height)!=overlay_height_){
+            release_overlay();
+            BITMAPINFO info{};info.bmiHeader.biSize=sizeof(BITMAPINFOHEADER);info.bmiHeader.biWidth=int(width);info.bmiHeader.biHeight=-int(height);info.bmiHeader.biPlanes=1;info.bmiHeader.biBitCount=32;info.bmiHeader.biCompression=BI_RGB;
+            overlay_dc_=CreateCompatibleDC(nullptr);void* bits=nullptr;overlay_bitmap_=CreateDIBSection(overlay_dc_,&info,DIB_RGB_COLORS,&bits,nullptr,0);
+            if(!overlay_dc_ || !overlay_bitmap_ || !bits){release_overlay();return;}
+            SelectObject(overlay_dc_,overlay_bitmap_);overlay_bits_=static_cast<std::uint32_t*>(bits);
+            overlay_width_=int(width);overlay_height_=int(height);
+        }
+        if(!overlay_bits_)return;
+        const auto rects=draw_overlay(overlay_dc_,int(width),int(height));GdiFlush();
+        const auto copy=[&](const RECT& r){
+            const int left=std::max<long>(0,r.left),top=std::max<long>(0,r.top);
+            const int right=std::min<long>(long(width),r.right),bottom=std::min<long>(long(height),r.bottom);
+            for(int y=top;y<bottom;++y)if(right>left)std::memcpy(image+std::size_t(y)*width+left,overlay_bits_+std::size_t(y)*width+left,std::size_t(right-left)*4u);
+        };
+        if(show_fps().load())copy(rects.fps);
+        if(show_controls_)copy(rects.help);
     }
     void run(){
         const auto instance=GetModuleHandleW(nullptr);
@@ -435,13 +500,14 @@ private:
                 SetStretchBltMode(dc,COLORONCOLOR);
                 StretchDIBits(dc,(client.right-width)/2,(client.bottom-height)/2,width,height,0,0,self->width_,self->height_,self->pixels_.data(),&info,DIB_RGB_COLORS,SRCCOPY);
             }
-            self->draw_overlay(dc);
+            self->draw_overlay(dc,client.right,client.bottom);
             if(dc!=target)BitBlt(target,0,0,client.right,client.bottom,dc,0,0,SRCCOPY);
             EndPaint(hwnd,&paint);return 0;
         }
         return DefWindowProcW(hwnd,message,w,l);
     }
 };
+#endif
 class NativeDisplay {
 public:
     struct Buffer {std::uint32_t address=0,stride=512,format=3;std::uint64_t input_us=0;};
@@ -622,11 +688,17 @@ public:
     std::vector<std::uint32_t> present_pixels_; // render thread only
     std::function<NativeHiresView(std::uint32_t)> hires_source_;std::uint64_t hires_presents_=0;mutable std::uint64_t hires_fallback_tiles_=0,hires_bad_presents_=0;
     std::chrono::steady_clock::time_point next_present_capture_{},capture_origin_=std::chrono::steady_clock::now();
+    static void bmp_u16(std::ofstream& out,unsigned value){const char bytes[2]={char(value&0xFFu),char((value>>8)&0xFFu)};out.write(bytes,2);}
+    static void bmp_u32(std::ofstream& out,std::uint32_t value){const char bytes[4]={char(value&0xFFu),char((value>>8)&0xFFu),char((value>>16)&0xFFu),char((value>>24)&0xFFu)};out.write(bytes,4);}
     static void write_bitmap(const std::filesystem::path& path,const std::vector<std::uint32_t>& data,unsigned width,unsigned height){
         const auto bytes=static_cast<std::uint32_t>(data.size()*4u);
-        BITMAPFILEHEADER file{};file.bfType=0x4D42;file.bfSize=sizeof(file)+sizeof(BITMAPINFOHEADER)+bytes;file.bfOffBits=sizeof(file)+sizeof(BITMAPINFOHEADER);
-        BITMAPINFOHEADER info{};info.biSize=sizeof(info);info.biWidth=LONG(width);info.biHeight=-LONG(height);info.biPlanes=1;info.biBitCount=32;info.biCompression=BI_RGB;info.biSizeImage=bytes;
-        std::ofstream out(path,std::ios::binary);out.write(reinterpret_cast<const char*>(&file),sizeof(file));out.write(reinterpret_cast<const char*>(&info),sizeof(info));out.write(reinterpret_cast<const char*>(data.data()),bytes);
+        std::ofstream out(path,std::ios::binary);
+        // 14-byte BMP file header + 40-byte BITMAPINFOHEADER, top-down 32-bit BGRA.
+        out.put('B');out.put('M');bmp_u32(out,14u+40u+bytes);bmp_u16(out,0);bmp_u16(out,0);bmp_u32(out,14u+40u);
+        bmp_u32(out,40u);bmp_u32(out,width);bmp_u32(out,0u-static_cast<std::uint32_t>(height));bmp_u16(out,1);bmp_u16(out,32);
+        bmp_u32(out,0);bmp_u32(out,bytes);bmp_u32(out,2835);bmp_u32(out,2835);bmp_u32(out,0);bmp_u32(out,0);
+        out.write(reinterpret_cast<const char*>(data.data()),bytes);
+        if(!out)throw std::runtime_error("Cannot write bitmap");
     }
     // 16-bit guest pixel to BGRA, per format; built once, thread-safely (the
     // render thread and captures both convert).
@@ -665,10 +737,11 @@ public:
         return;
     }
     void save_bitmap(const std::filesystem::path& path,bool fps_overlay=false) const {
-        auto data=pixels();const auto bytes=static_cast<std::uint32_t>(data.size()*4u);
-        BITMAPFILEHEADER file{};file.bfType=0x4D42;file.bfSize=sizeof(file)+sizeof(BITMAPINFOHEADER)+bytes;file.bfOffBits=sizeof(file)+sizeof(BITMAPINFOHEADER);
-        BITMAPINFOHEADER info{};info.biSize=sizeof(info);info.biWidth=width_;info.biHeight=-static_cast<LONG>(height_);info.biPlanes=1;info.biBitCount=32;info.biCompression=BI_RGB;info.biSizeImage=bytes;
+        auto data=pixels();
+#ifdef _WIN32
         if(fps_overlay){
+            const auto bytes=static_cast<std::uint32_t>(data.size()*4u);
+            BITMAPINFOHEADER info{};info.biSize=sizeof(info);info.biWidth=width_;info.biHeight=-static_cast<LONG>(height_);info.biPlanes=1;info.biBitCount=32;info.biCompression=BI_RGB;info.biSizeImage=bytes;
             BITMAPINFO dib{};dib.bmiHeader=info;HDC dc=CreateCompatibleDC(nullptr);void* pixels=nullptr;HBITMAP bitmap=CreateDIBSection(dc,&dib,DIB_RGB_COLORS,&pixels,nullptr,0);
             if(!dc || !bitmap || !pixels){if(bitmap)DeleteObject(bitmap);if(dc)DeleteDC(dc);throw std::runtime_error("Cannot create FPS capture overlay");}
             const auto old=SelectObject(dc,bitmap);std::memcpy(pixels,data.data(),bytes);
@@ -677,8 +750,10 @@ public:
             const auto font=CreateFontW(-17,0,0,0,FW_BOLD,FALSE,FALSE,FALSE,DEFAULT_CHARSET,OUT_DEFAULT_PRECIS,CLIP_DEFAULT_PRECIS,CLEARTYPE_QUALITY,DEFAULT_PITCH,L"Segoe UI");const auto oldfont=SelectObject(dc,font);
             TextOutW(dc,14,11,label,std::wcslen(label));GdiFlush();std::memcpy(data.data(),pixels,bytes);SelectObject(dc,oldfont);if(font)DeleteObject(font);SelectObject(dc,old);DeleteObject(bitmap);DeleteDC(dc);
         }
-        std::ofstream output(path,std::ios::binary);output.write(reinterpret_cast<const char*>(&file),sizeof(file));output.write(reinterpret_cast<const char*>(&info),sizeof(info));output.write(reinterpret_cast<const char*>(data.data()),bytes);
-        if(!output)throw std::runtime_error("Cannot save native framebuffer evidence");
+#else
+        (void)fps_overlay;
+#endif
+        write_bitmap(path,data,width_,height_);
     }
 private:
     psprecomp::GuestMemory& memory_;bool show_window_=false;

@@ -29,6 +29,9 @@ public:
         "Dear My Keys ~Kenban no Mahou~","Humming Bird","Girly Storm Shissou Stick","Mezase Happy 100%"};
     // Called on every change of presence.
     std::function<void(const Presence&)> on_change;
+    // Called once per song when the results screen is loaded (result.bin), for
+    // diagnostics that stop the runtime there (--stop-on-result).
+    std::function<void()> on_results;
     void on_member(std::string name){
         for(auto& c:name)if(c=='\\')c='/';
         const auto slash=name.rfind('/');const std::string file=slash==std::string::npos?name:name.substr(slash+1);
@@ -41,7 +44,15 @@ public:
             if(song!=song_ || mode_!=Mode::Song){song_=song;++played_;}
             mode_=Mode::Song;band_=band;since_=now();publish();return;
         }
-        if(file=="result.bin"){if(mode_==Mode::Song){mode_=Mode::Results;publish();}return;}
+        if(file=="result.bin"){
+            if(mode_!=Mode::Results){
+                const bool from_song=mode_==Mode::Song;
+                mode_=Mode::Results;
+                if(from_song)publish();
+                if(on_results)on_results();
+            }
+            return;
+        }
         if(file=="menu.bin"){if(mode_!=Mode::Menu){mode_=Mode::Menu;since_=now();publish();}return;}
         if(starts("teatime_") || starts("tt_chr_")){if(mode_!=Mode::Club){mode_=Mode::Club;since_=now();publish();}return;}
         if(starts("mrg_pv_")){if(mode_!=Mode::Pv){mode_=Mode::Pv;since_=now();publish();}return;}

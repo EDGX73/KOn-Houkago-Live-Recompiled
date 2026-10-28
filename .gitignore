@@ -13,5 +13,9 @@ __pycache__/
 ultimo_fallo.txt
 /mods/
 /config/controls.ini
+/config/audit_private_words.txt
+/config/android-test.keystore
+/config/android-test.keystore.pass
 /dist/
 /assets/branding/base.*
+/github/

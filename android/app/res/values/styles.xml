@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Platform theme only: the app has no AndroidX or Material dependency. -->
+    <style name="Theme.KonRecompiled" parent="android:style/Theme.Material.Light.NoActionBar">
+        <item name="android:colorPrimary">#C2185B</item>
+        <item name="android:colorPrimaryDark">#880E4F</item>
+        <item name="android:colorAccent">#C2185B</item>
+        <item name="android:windowBackground">#FFF7FA</item>
+        <item name="android:statusBarColor">#880E4F</item>
+        <item name="android:navigationBarColor">#FFF7FA</item>
+        <item name="android:windowLightStatusBar">true</item>
+        <item name="android:windowLightNavigationBar">true</item>
+        <item name="android:windowActionModeOverlay">true</item>
+    </style>
+</resources>

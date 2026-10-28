@@ -1,6 +1,4 @@
-#define WIN32_LEAN_AND_MEAN
-#define NOMINMAX
-#include <windows.h>
+#include "platform/library.hpp"
 #define VK_NO_PROTOTYPES
 #include <vulkan/vulkan.h>
 #include "native_vulkan_clear.hpp"
@@ -54,7 +52,7 @@ struct NativeVulkanClear::Impl {
         unsigned oldest=0;for(unsigned n=1;n<kPlanes;++n)if(planes[n].used<planes[oldest].used)oldest=n;
         auto& p=planes[oldest];p.key=key;p.stride=stride;p.width=p.rows=0;p.snapshot.clear();p.valid=false;p.used=++plane_clock;return oldest;
     }
-    HMODULE loader=nullptr;
+    platform::DynamicLibrary loader;
     VkInstance instance=nullptr;VkDevice device=nullptr;VkQueue queue=nullptr;
     VkBuffer buffer=nullptr,raster_buffer=nullptr;VkDeviceMemory memory=nullptr,raster_memory=nullptr;
     VkCommandPool pool=nullptr;VkCommandBuffer command=nullptr;VkFence fence=nullptr;
@@ -155,12 +153,12 @@ struct NativeVulkanClear::Impl {
             if(vkDestroyDevice)vkDestroyDevice(device,nullptr);
         }
         if(instance && vkDestroyInstance)vkDestroyInstance(instance,nullptr);
-        if(loader)FreeLibrary(loader);
+        loader.close();
     }
     void initialize(){
-        loader=LoadLibraryExW(L"vulkan-1.dll",nullptr,LOAD_LIBRARY_SEARCH_SYSTEM32);
+        loader=platform::open_vulkan_loader();
         if(!loader)throw std::runtime_error("System Vulkan loader is unavailable for --vulkan-clear");
-        const auto get_instance=reinterpret_cast<PFN_vkGetInstanceProcAddr>(GetProcAddress(loader,"vkGetInstanceProcAddr"));
+        const auto get_instance=loader.symbol<PFN_vkGetInstanceProcAddr>("vkGetInstanceProcAddr");
         if(!get_instance)throw std::runtime_error("Missing Vulkan loader entry point");
         const auto entry=[&](const char* symbol){auto result=get_instance(instance,symbol);if(!result)throw std::runtime_error(std::string("Missing Vulkan entry ")+symbol);return result;};
         const auto create_instance=reinterpret_cast<PFN_vkCreateInstance>(entry("vkCreateInstance"));

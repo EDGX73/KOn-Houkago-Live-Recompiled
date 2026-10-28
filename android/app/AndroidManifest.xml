@@ -1,0 +1,72 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Public Android app of K-On! Houkago Live!! Recompiled.
+
+  This manifest is a template: tools/make_android_apk.py replaces
+  @KON_VERSION_NAME@ and @KON_VERSION_CODE@ (versionName comes from
+  src/kon_version.h, versionCode from the tool) while staging the build, then
+  aapt2 links the result. No game data is declared or packaged here: the app
+  only contains the Java UI and libkon_probe.so (PSPRecomp decoder only).
+-->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="com.edgx73.konrecompiled"
+    android:versionCode="@KON_VERSION_CODE@"
+    android:versionName="@KON_VERSION_NAME@">
+
+    <!-- GitHub release check (HTTPS only) and the system package installer. -->
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
+    <!-- On-device build: keep it alive with a foreground notification. -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+
+    <!-- 64-bit phones (S24 Ultra: arm64-v8a) and the x86_64 emulator. -->
+    <uses-sdk android:minSdkVersion="26" android:targetSdkVersion="36" />
+
+    <application
+        android:allowBackup="false"
+        android:extractNativeLibs="true"
+        android:icon="@mipmap/ic_launcher"
+        android:label="@string/app_name"
+        android:largeHeap="true"
+        android:supportsRtl="true"
+        android:theme="@style/Theme.KonRecompiled"
+        android:usesCleartextTraffic="false">
+
+        <activity
+            android:name=".MainActivity"
+            android:configChanges="orientation|screenSize|screenLayout|keyboardHidden"
+            android:exported="true"
+            android:label="@string/app_name"
+            android:launchMode="singleTop">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <activity
+            android:name=".GameActivity"
+            android:configChanges="orientation|screenSize|screenLayout|keyboardHidden"
+            android:exported="false"
+            android:launchMode="singleTop"
+            android:screenOrientation="sensorLandscape"
+            android:theme="@android:style/Theme.Black.NoTitleBar.Fullscreen" />
+
+        <!-- PackageInstaller delivers the result to this explicit PendingIntent. -->
+        <receiver
+            android:name=".InstallResultReceiver"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="com.edgx73.konrecompiled.INSTALL_RESULT" />
+            </intent-filter>
+        </receiver>
+
+        <!-- On-device build (EBOOT → psp_recomp → zig → libkon_game.so). -->
+        <service
+            android:name=".BuildService"
+            android:exported="false"
+            android:foregroundServiceType="dataSync" />
+    </application>
+</manifest>

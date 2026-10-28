@@ -144,9 +144,13 @@ def main():
     ap.add_argument("--sheet")
     ap.add_argument("--list", help="reuse a previous run's printed entries instead of scanning")
     a = ap.parse_args()
-    ref_path = glob.glob(os.path.join(a.folder, EXEMPLAR_FILE + "_*.bmp"))[0]
-    ref_L = luminance(ref_path)
-    references = {f: interior(ref_L, x, y) for f, (x, y) in EXEMPLARS.items()}
+    references = {}
+    if not a.list:
+        ref_paths = glob.glob(os.path.join(a.folder, EXEMPLAR_FILE + "_*.bmp"))
+        if not ref_paths:
+            raise SystemExit(f"glyph_scan: exemplar {EXEMPLAR_FILE} is not in {a.folder}; use a complete dump or --list")
+        ref_L = luminance(ref_paths[0])
+        references = {f: interior(ref_L, x, y) for f, (x, y) in EXEMPLARS.items()}
     entries = []
     for path in ([] if a.list else sorted(glob.glob(os.path.join(a.folder, "*.bmp")))):
         name = os.path.basename(path)
@@ -170,12 +174,24 @@ def main():
     for e in entries:
         print(*e)
     if a.list:
-        entries = [(l.split()[0], int(l.split()[1]), int(l.split()[2]), l.split()[3], float(l.split()[4]), float(l.split()[5]), float(l.split()[6]), l.split()[7]) for l in open(a.list) if l.strip()]
+        raw = open(a.list, "rb").read()
+        text = raw.decode("utf-16") if raw.startswith((b"\xff\xfe", b"\xfe\xff")) else raw.decode("utf-8-sig", errors="replace")
+        entries = []
+        for line in text.splitlines():
+            p = line.split()
+            if len(p) < 8:
+                continue
+            try:
+                entries.append((p[0], int(p[1]), int(p[2]), p[3], float(p[4]), float(p[5]), float(p[6]), p[7]))
+            except ValueError:
+                continue  # console noise or a header line
     if a.sheet:
         crops = []
         for h, w, hh, kind, cx, cy, r, face in entries:
-            path = glob.glob(os.path.join(a.folder, h + "_*.bmp"))[0]
-            im = Image.open(path).convert("RGBA")
+            paths = glob.glob(os.path.join(a.folder, h + "_*.bmp"))
+            if not paths:
+                continue  # partial dump: the fixed table entries may not be present
+            im = Image.open(paths[0]).convert("RGBA")
             R = int(r) + 4
             c = im.crop((int(cx) - R, int(cy) - R, int(cx) + R, int(cy) + R))
             bg = Image.new("RGBA", c.size, (90, 90, 90, 255)); bg.alpha_composite(c)

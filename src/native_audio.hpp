@@ -1,13 +1,6 @@
 #pragma once
 #include <cstdlib>
-#ifndef NOMINMAX
-#define NOMINMAX
-#endif
-#ifndef WIN32_LEAN_AND_MEAN
-#define WIN32_LEAN_AND_MEAN
-#endif
-#include <windows.h>
-#include <mmsystem.h>
+#include "platform/audio.hpp"
 #include "native_audio_mixer.hpp"
 #include "native_wait.hpp"
 #include <algorithm>
@@ -20,7 +13,7 @@
 #include <string>
 #include <vector>
 namespace kon {
-// One continuous Windows stream. The native mixer owns PCM, copies channels
+// One continuous host stream (platform/audio.hpp). The native mixer owns PCM, copies channels
 // at 44100 Hz, and reports completed copy tokens independently of DAC playback.
 // No guest memory or recompiled functions execute on the audio worker.
 class NativeAudio {
@@ -44,7 +37,7 @@ public:
     // Blocking writers may queue about 24 ms ahead (KON_AUDIO_QUEUE_MS; 0 keeps
     // the original one-buffer-ahead behaviour).
     NativeAudio(){const char* ms=std::getenv("KON_AUDIO_QUEUE_MS");mixer_.min_queued_frames=std::uint64_t((ms?std::stod(ms):24.0)*44.1);}
-    ~NativeAudio(){stopping_.store(true);if(worker_.joinable())worker_.join();if(device_)waveOutClose(device_);}
+    ~NativeAudio(){stopping_.store(true);if(worker_.joinable())worker_.join();}  // then device_ closes
     NativeAudio(const NativeAudio&)=delete;NativeAudio& operator=(const NativeAudio&)=delete;
     std::uint32_t reserve(std::int32_t requested,unsigned frames,unsigned format){
         std::lock_guard lock(mutex_);check_failure();
@@ -52,9 +45,8 @@ public:
         if(static_cast<unsigned>(requested)>=8 || mixer_.channels[requested].reserved || !mixer_.channels[requested].queue.empty())return invalid_channel;
         if(!valid_frames(frames))return 0x80260006u;if(format!=0 && format!=0x10)return 0x80260007u;
         mixer_.reserve(requested,frames,format);
-        if(!device_){
-            WAVEFORMATEX wave{};wave.wFormatTag=WAVE_FORMAT_PCM;wave.nChannels=2;wave.nSamplesPerSec=44100;wave.wBitsPerSample=16;wave.nBlockAlign=4;wave.nAvgBytesPerSec=176400;
-            checked(waveOutOpen(&device_,WAVE_MAPPER,&wave,reinterpret_cast<DWORD_PTR>(&completion),0,CALLBACK_FUNCTION),"Open continuous Windows audio");
+        if(!device_.is_open()){
+            device_.open();
             worker_=std::thread([this]{run();});
         }
         return requested;
@@ -75,24 +67,18 @@ public:
     std::uint32_t rest_frames(unsigned channel){std::lock_guard lock(mutex_);check_failure();if(channel>=8)return invalid_channel;if(!mixer_.channels[channel].reserved)return not_reserved;return mixer_.remaining(channel);}
     Diagnostics diagnostics(unsigned channel)const{std::lock_guard lock(mutex_);check_failure();return mixer_.diagnostics(channel);}
 private:
-    struct DeviceBuffer {WAVEHDR header{};std::vector<std::int16_t> samples;std::atomic<bool> done{false};};
-    mutable std::mutex mutex_;NativeAudioMixer mixer_;HWAVEOUT device_=nullptr;std::thread worker_;std::atomic<bool> stopping_{false};std::exception_ptr failure_;std::atomic<std::uint64_t> underruns_{0};
+    mutable std::mutex mutex_;NativeAudioMixer mixer_;platform::PcmOutput device_;std::thread worker_;std::atomic<bool> stopping_{false};std::exception_ptr failure_;std::atomic<std::uint64_t> underruns_{0};
     static std::uint64_t now_us(){return static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now().time_since_epoch()).count());}
     static bool valid_frames(unsigned n){return n>0 && n<=65472 && !(n&63u);}
     void check_failure()const{if(failure_)std::rethrow_exception(failure_);}
     std::uint32_t volume(unsigned channel,int left,int right){if(channel>=8)return invalid_channel;if(left>0xFFFF || right>0xFFFF)return 0x8026000Bu;auto& c=mixer_.channels[channel];if(!c.reserved)return not_reserved;if(left>=0)c.left=left;if(right>=0)c.right=right;return 0;}
-    static void checked(MMRESULT error,const char* operation){if(error!=MMSYSERR_NOERROR)throw std::runtime_error(std::string(operation)+" Windows audio error="+std::to_string(error));}
-    static void CALLBACK completion(HWAVEOUT,UINT message,DWORD_PTR,DWORD_PTR first,DWORD_PTR){if(message==WOM_DONE){auto* h=reinterpret_cast<WAVEHDR*>(first);reinterpret_cast<DeviceBuffer*>(h->dwUser)->done.store(true,std::memory_order_release);}}
     void run(){
-        std::deque<std::unique_ptr<DeviceBuffer>> queue;std::uint64_t submitted=0,position_high=0;std::uint32_t previous_position=0;
-        const auto retire=[&]{while(!queue.empty() && queue.front()->done.load(std::memory_order_acquire)){checked(waveOutUnprepareHeader(device_,&queue.front()->header,sizeof(WAVEHDR)),"Retire continuous PCM buffer");queue.pop_front();}};
+        std::vector<std::int16_t> silence;
+        const auto retire=[&]{device_.retire();};
         const auto send=[&](std::span<const std::int16_t> samples){
-            auto b=std::make_unique<DeviceBuffer>();if(muted())b->samples.assign(samples.size(),0);else b->samples.assign(samples.begin(),samples.end());b->header.lpData=reinterpret_cast<LPSTR>(b->samples.data());b->header.dwBufferLength=b->samples.size()*2u;b->header.dwUser=reinterpret_cast<DWORD_PTR>(b.get());
-            checked(waveOutPrepareHeader(device_,&b->header,sizeof(WAVEHDR)),"Prepare continuous PCM buffer");const auto result=waveOutWrite(device_,&b->header,sizeof(WAVEHDR));
-            if(result!=MMSYSERR_NOERROR){waveOutUnprepareHeader(device_,&b->header,sizeof(WAVEHDR));checked(result,"Submit continuous PCM buffer");}
-            submitted+=samples.size()/2u;queue.push_back(std::move(b));
+            if(muted()){silence.assign(samples.size(),0);device_.submit(silence);}else device_.submit(samples);
         };
-        const auto playback=[&]{MMTIME time{};time.wType=TIME_SAMPLES;checked(waveOutGetPosition(device_,&time,sizeof(time)),"Read continuous audio sample clock");if(time.wType!=TIME_SAMPLES)throw std::runtime_error("Audio driver did not provide its sample clock");const auto current=time.u.sample;if(current<previous_position)position_high+=0x100000000ull;previous_position=current;const auto played=position_high+current;if(played>submitted)throw std::runtime_error("Audio driver played beyond submitted PCM");std::lock_guard lock(mutex_);mixer_.played(played);};
+        const auto playback=[&]{const auto played=device_.played_frames();std::lock_guard lock(mutex_);mixer_.played(played);};
         try{
             NativeWait wait;const unsigned block=block_frames();std::vector<std::int16_t> staging(block*2u,0);
             // Prime two host blocks (output latency ~2 blocks: 46 ms at 1024
@@ -104,14 +90,14 @@ private:
                 {std::lock_guard lock(mutex_);mixer_.mix(std::span(staging).subspan(cursor*2u,128u),timeline+cursor,now);}
                 cursor+=64;++steps;
                 if(cursor==block){
-                    while(queue.size()>=4 && !stopping_.load()){wait.wait_for(500);retire();playback();}
-                    if(stopping_.load())break;retire();if(queue.empty())underruns_.fetch_add(1,std::memory_order_relaxed);
+                    while(device_.queued()>=4 && !stopping_.load()){wait.wait_for(500);retire();playback();}
+                    if(stopping_.load())break;retire();if(!device_.queued())underruns_.fetch_add(1,std::memory_order_relaxed);
                     send(staging);timeline+=block;cursor=0;
                 }
             }
         }catch(...){std::lock_guard lock(mutex_);failure_=std::current_exception();}
         // Buffers remain alive until the real driver has relinquished them.
-        waveOutReset(device_);for(auto& b:queue)waveOutUnprepareHeader(device_,&b->header,sizeof(WAVEHDR));
+        device_.stop();
     }
 };
 }

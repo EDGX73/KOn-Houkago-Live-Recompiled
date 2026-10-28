@@ -10,11 +10,34 @@ if(NOT MSVC)
 endif()
 option(KON_FULL_AOT "Compile complete generated corpus rather than bootstrap slice" OFF)
 set(KON_OPTIMIZED_AOT_UNITS "ALL" CACHE STRING "ALL for native release optimization, a semicolon list of four-digit units, or empty for diagnostic O0")
-add_library(psprecomp_core STATIC IMPORTED)
-set_target_properties(psprecomp_core PROPERTIES
-    IMPORTED_LOCATION "${CMAKE_CURRENT_SOURCE_DIR}/build/framework/libpsprecomp_core.a"
-    INTERFACE_INCLUDE_DIRECTORIES "${CMAKE_CURRENT_SOURCE_DIR}/third_party/PSPRecomp/include")
-if(KON_FULL_AOT)
+# The portable PSP core is the same library on every platform. Windows links the
+# prebuilt archive produced by build/framework (third_party/PSPRecomp), which is
+# a native x86-64 object; Android has no such archive, so the NDK compiles the
+# same eight sources here. Neither path changes the other.
+if(ANDROID)
+    if(NOT EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/third_party/PSPRecomp/src/runtime.cpp")
+        message(FATAL_ERROR "The Android build needs the PSPRecomp sources in third_party/PSPRecomp")
+    endif()
+    add_library(psprecomp_core STATIC
+        third_party/PSPRecomp/src/decoder.cpp
+        third_party/PSPRecomp/src/deflate.cpp
+        third_party/PSPRecomp/src/elf32.cpp
+        third_party/PSPRecomp/src/guest_memory.cpp
+        third_party/PSPRecomp/src/nid_registry.cpp
+        third_party/PSPRecomp/src/program_analysis.cpp
+        third_party/PSPRecomp/src/runtime.cpp
+        third_party/PSPRecomp/src/sha256.cpp)
+    target_include_directories(psprecomp_core PUBLIC third_party/PSPRecomp/include)
+    target_compile_options(psprecomp_core PRIVATE -O2 -Wall -Wextra -Wpedantic -Wconversion -Wshadow)
+else()
+    add_library(psprecomp_core STATIC IMPORTED)
+    set_target_properties(psprecomp_core PROPERTIES
+        IMPORTED_LOCATION "${CMAKE_CURRENT_SOURCE_DIR}/build/framework/libpsprecomp_core.a"
+        INTERFACE_INCLUDE_DIRECTORIES "${CMAKE_CURRENT_SOURCE_DIR}/third_party/PSPRecomp/include")
+endif()
+# The generated corpus is the game code translated by PSPRecomp; it is portable
+# C++ and the Android build always uses all of it (126 units + registry).
+if(ANDROID OR KON_FULL_AOT)
     if(NOT EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/work/recompiled_corrected/auto_codegen_report.json")
         message(FATAL_ERROR "Complete automatic code generation required")
     endif()
@@ -22,6 +45,11 @@ if(KON_FULL_AOT)
 else()
     set(KON_GUEST_SOURCES work/bootstrap/guest.cpp)
 endif()
+# Everything below is the Windows port: it includes Win32 headers (windows.h via
+# native_display.hpp), links user32/gdi32/winmm/... and embeds a PE resource.
+# Phase 0 of the Android port only builds the portable core above, so the whole
+# block stays as it was for Windows and is skipped entirely for Android.
+if(NOT ANDROID)
 # The port's own code (runtime, renderer, audio, online...), without any of the
 # game's: the release package ships it as a library and the launcher links it
 # with the game code translated on the player's PC (src/native_build.hpp).
@@ -37,7 +65,8 @@ target_link_libraries(kon_boot_probe PRIVATE kon_host)
 # The player's program: installs from the ISO, builds the game and starts it.
 add_executable(kon_launcher src/launcher.cpp)
 target_include_directories(kon_launcher PRIVATE src)
-target_link_libraries(kon_launcher PRIVATE psprecomp_core comdlg32 bcrypt winhttp)
+# comctl32: progress bar of the visible update dialog (src/update_dialog.hpp).
+target_link_libraries(kon_launcher PRIVATE psprecomp_core comdlg32 bcrypt winhttp comctl32)
 target_link_options(kon_launcher PRIVATE -municode -mwindows)
 # Always leave one "Ultima version <fecha hora>.cmd" launcher for the newest build.
 add_custom_command(TARGET kon_boot_probe POST_BUILD COMMAND ${CMAKE_COMMAND} "-DROOT=${CMAKE_SOURCE_DIR}" "-DEXE=$<TARGET_FILE:kon_boot_probe>" -P "${CMAKE_SOURCE_DIR}/tools/write_latest_launcher.cmake" VERBATIM)
@@ -160,6 +189,9 @@ target_link_libraries(benchmark_native_draw PRIVATE psprecomp_core user32 gdi32)
 add_executable(native_parallel_raster_test src/native_parallel_raster_test.cpp)
 target_link_libraries(native_parallel_raster_test PRIVATE psprecomp_core)
 add_test(NAME native_parallel_raster_exactness COMMAND native_parallel_raster_test)
+# Reference relocation of a PSP PRX (compared with tools/psp_prx_to_exec.py).
+add_executable(prx_image_dump src/prx_image_dump.cpp)
+target_link_libraries(prx_image_dump PRIVATE psprecomp_core)
 add_executable(native_gpu_probe src/native_gpu_probe.cpp)
 target_link_libraries(native_gpu_probe PRIVATE d3d11 dxgi dxguid)
 
@@ -184,6 +216,9 @@ add_executable(native_gamepad_test src/native_gamepad_test.cpp)
 add_test(NAME native_gamepad_reports COMMAND native_gamepad_test)
 add_executable(native_discord_test src/native_discord_test.cpp)
 add_test(NAME native_discord_presence COMMAND native_discord_test "${CMAKE_CURRENT_SOURCE_DIR}/analysis/extracted/en/PSP_GAME/USRDIR/std.cpk")
+add_executable(native_image_test src/native_image_test.cpp)
+target_link_libraries(native_image_test PRIVATE ole32 windowscodecs)
+add_test(NAME native_png_decoder COMMAND native_image_test "${CMAKE_CURRENT_SOURCE_DIR}")
 add_executable(native_upscale_test src/native_upscale_test.cpp)
 add_test(NAME native_texture_upscale COMMAND native_upscale_test)
 add_executable(native_glyph_test src/native_glyph_test.cpp)
@@ -292,3 +327,88 @@ add_test(NAME original_vram_gpu_ownership COMMAND native_vram_ownership_test)
 add_executable(native_render_worker_test src/native_render_worker_test.cpp)
 target_link_libraries(native_render_worker_test PRIVATE psprecomp_core)
 add_test(NAME native_independent_render_worker COMMAND native_render_worker_test)
+endif() # NOT ANDROID
+
+# ---------------------------------------------------------------------------
+# Android (phase 0): the portable core and the generated corpus, plus headless
+# probes. No window, no Activity, no JNI, no APK: these are plain Android
+# executables built against bionic and pushed with adb.
+# ---------------------------------------------------------------------------
+if(ANDROID)
+    # All 127 generated translation units (126 units + registry) as one library.
+    # The corpus is portable C++: it includes only psprecomp headers, <bit>,
+    # <cmath>, <cstdint> and <limits>, with no windows.h and no Win32 API.
+    add_library(kon_guest_corpus STATIC ${KON_GUEST_SOURCES})
+    target_include_directories(kon_guest_corpus PRIVATE work/recompiled_corrected)
+    target_link_libraries(kon_guest_corpus PUBLIC psprecomp_core)
+    # Same release optimization the Windows corpus uses; the generated units are
+    # huge single functions, so keep the diagnostic sanitizer flags out.
+    target_compile_options(kon_guest_corpus PRIVATE -O2 -fno-sanitize=undefined)
+
+    # The patched corpus reads the PC frame-rate host state that Windows defines
+    # in src/boot_probe.cpp; this portable mirror provides the same 30 FPS
+    # defaults for the Android core (see the file header).
+    add_library(kon_android_host STATIC android/host_symbols.cpp)
+    target_link_libraries(kon_android_host PUBLIC psprecomp_core)
+
+    # Public runtime: the portable game loop from src/boot_probe.cpp
+    # (compiled as kon_main), the Android window/JNI glue and the host
+    # services. It contains no generated game code; the private module is
+    # loaded from the player's own pack at run time.
+    set(KON_FFMPEG_ANDROID "${CMAKE_CURRENT_SOURCE_DIR}/third_party/ffmpeg-android/${ANDROID_ABI}")
+    add_library(kon_android_runtime SHARED
+        src/boot_probe.cpp
+        android/android_game.cpp
+        android/android_iso.cpp
+        src/native_media.cpp
+        src/native_controls.cpp
+        src/native_adhoc.cpp
+        src/native_online.cpp
+        src/native_network.cpp
+        src/host_headphones.cpp)
+    set_source_files_properties(src/boot_probe.cpp PROPERTIES COMPILE_DEFINITIONS "main=kon_main")
+    set_target_properties(kon_android_runtime PROPERTIES POSITION_INDEPENDENT_CODE ON OUTPUT_NAME kon_runtime)
+    set_target_properties(psprecomp_core PROPERTIES POSITION_INDEPENDENT_CODE ON)
+    set_target_properties(kon_guest_corpus PROPERTIES POSITION_INDEPENDENT_CODE ON)
+    set_target_properties(kon_android_host PROPERTIES POSITION_INDEPENDENT_CODE ON)
+    target_include_directories(kon_android_runtime PRIVATE src)
+    target_link_libraries(kon_android_runtime PRIVATE psprecomp_core android log aaudio dl m atomic)
+    if(EXISTS "${KON_FFMPEG_ANDROID}/lib/libavcodec.a")
+        target_include_directories(kon_android_runtime PRIVATE "${KON_FFMPEG_ANDROID}/include")
+        target_link_libraries(kon_android_runtime PRIVATE
+            "${KON_FFMPEG_ANDROID}/lib/libavformat.a"
+            "${KON_FFMPEG_ANDROID}/lib/libavcodec.a"
+            "${KON_FFMPEG_ANDROID}/lib/libswresample.a"
+            "${KON_FFMPEG_ANDROID}/lib/libavutil.a")
+    else()
+        message(WARNING "FFmpeg for Android is missing at ${KON_FFMPEG_ANDROID}; kon_android_runtime will not link yet")
+    endif()
+
+    # Private game module: generated corpus + registration entry point and the
+    # 30 FPS host symbols it reads. Built locally from the player's ISO; never
+    # packaged in the public APK.
+    add_library(kon_android_game_module SHARED
+        android/game_module.cpp)
+    target_link_libraries(kon_android_game_module PRIVATE kon_guest_corpus kon_android_host psprecomp_core m atomic)
+    set_target_properties(kon_android_game_module PROPERTIES
+        POSITION_INDEPENDENT_CODE ON OUTPUT_NAME kon_game)
+    target_include_directories(kon_android_game_module PRIVATE work/recompiled_corrected)
+
+    # Headless probe: registers every generated unit in a Runtime (this executes
+    # the corpus registration code on the device) and checks that the PSP core
+    # decoded the game's own MADD opcode. Guest gameplay blocks need the
+    # decrypted EBOOT and the mounted content, which is phase 1.
+    add_executable(android_probe_test android/probe_main.cpp)
+    target_include_directories(android_probe_test PRIVATE work/recompiled_corrected)
+    target_link_libraries(android_probe_test PRIVATE kon_guest_corpus kon_android_host psprecomp_core)
+
+    # Same generated-instruction test as the Windows allegrex_execution test: it
+    # runs recompiled guest code (MADD edge cases, BREAK trap) on the device ABI.
+    add_executable(android_guest_exec_test
+        src/allegrex_instruction_test.cpp work/instruction_fixture/guest.cpp)
+    target_link_libraries(android_guest_exec_test PRIVATE psprecomp_core)
+
+    enable_testing()
+    add_test(NAME android_corpus_registration COMMAND android_probe_test)
+    add_test(NAME android_generated_instruction_execution COMMAND android_guest_exec_test)
+endif()

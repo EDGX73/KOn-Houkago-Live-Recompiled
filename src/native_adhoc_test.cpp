@@ -95,7 +95,7 @@ int main(){try{
         options.mac=Mac{0x02,0,0,0,1,0x03};AdhocNet c("third",options);
         constexpr std::uint16_t port=41699;
         check(a.online_host(port),"Relay hosted");
-        AdhocNet::Options other=options;other.mac=Mac{0x02,0,0,0,1,0x09};AdhocNet taken("x",other);check(!taken.online_host(port) && taken.online().error.find("in use")!=std::string::npos,"A taken relay port is reported");
+        AdhocNet::Options other=options;other.mac=Mac{0x02,0,0,0,1,0x09};AdhocNet taken("x",other);check(!taken.online_host(port) && taken.online().error.find("en uso")!=std::string::npos,"A taken relay port is reported");
         check(b.online_join("127.0.0.1",port),"Join the relay");
         check(until([&]{return a.online().linked && b.online().linked && a.online().hosting;}),"Both linked to the relay");
         scenario(a,b,band);

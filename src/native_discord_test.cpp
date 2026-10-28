@@ -5,15 +5,54 @@
 #include <filesystem>
 #include <iostream>
 #include <stdexcept>
+#ifndef _WIN32
+#include <sys/socket.h>
+#include <sys/un.h>
+#include <unistd.h>
+#endif
 // Presence from the files the game loads, the Discord IPC frames against a
 // private pipe standing in for the Discord client, and (with the extracted
 // disc given) the std.cpk member lookup.
 using namespace kon;
 static void check(bool ok,const char* what){if(!ok)throw std::runtime_error(what);}
-static std::string read_frame(HANDLE pipe,std::uint32_t& op){
-    std::uint32_t head[2]{};DWORD got=0;
-    if(!ReadFile(pipe,head,8,&got,nullptr) || got!=8)throw std::runtime_error("No IPC frame header");
-    std::string json(head[1],'\0');if(head[1] && (!ReadFile(pipe,json.data(),head[1],&got,nullptr) || got!=head[1]))throw std::runtime_error("Short IPC frame");
+// The private endpoint standing in for the Discord client: a named pipe on
+// Windows, a Unix domain socket elsewhere (platform/ipc.hpp).
+#ifdef _WIN32
+struct TestServer {
+    platform::NativeString prefix=L"\\\\.\\pipe\\kon-discord-test-"+std::to_wstring(GetCurrentProcessId())+L"-";
+    HANDLE pipe=CreateNamedPipeW((prefix+L"0").c_str(),PIPE_ACCESS_DUPLEX,PIPE_TYPE_BYTE|PIPE_READMODE_BYTE|PIPE_WAIT,1,65536,65536,0,nullptr);
+    bool ready()const{return pipe!=INVALID_HANDLE_VALUE;}
+    bool accept(){return ConnectNamedPipe(pipe,nullptr) || GetLastError()==ERROR_PIPE_CONNECTED;}
+    bool read(void* data,std::uint32_t size){DWORD got=0;return ReadFile(pipe,data,size,&got,nullptr) && got==size;}
+    void write(const std::vector<std::uint8_t>& bytes){DWORD put=0;WriteFile(pipe,bytes.data(),DWORD(bytes.size()),&put,nullptr);}
+    ~TestServer(){CloseHandle(pipe);}
+};
+#else
+struct TestServer {
+    platform::NativeString prefix=(std::filesystem::temp_directory_path()/("kon-discord-test-"+std::to_string(getpid())+"-")).string();
+    std::string path=prefix+"0";int listener=-1,client=-1;
+    TestServer(){
+        ::unlink(path.c_str());sockaddr_un address{};address.sun_family=AF_UNIX;
+        if(path.size()>=sizeof address.sun_path)return;
+        std::memcpy(address.sun_path,path.c_str(),path.size()+1);
+        listener=::socket(AF_UNIX,SOCK_STREAM,0);
+        if(listener>=0 && (::bind(listener,reinterpret_cast<sockaddr*>(&address),sizeof address) || ::listen(listener,1))){::close(listener);listener=-1;}
+    }
+    bool ready()const{return listener>=0;}
+    bool accept(){client=::accept(listener,nullptr,nullptr);return client>=0;}
+    bool read(void* data,std::uint32_t size){
+        std::uint32_t total=0;
+        while(total<size){const auto r=::recv(client,static_cast<char*>(data)+total,size-total,0);if(r<=0)return false;total+=std::uint32_t(r);}
+        return true;
+    }
+    void write(const std::vector<std::uint8_t>& bytes){(void)::send(client,bytes.data(),bytes.size(),MSG_NOSIGNAL);}
+    ~TestServer(){if(client>=0)::close(client);if(listener>=0)::close(listener);::unlink(path.c_str());}
+};
+#endif
+static std::string read_frame(TestServer& server,std::uint32_t& op){
+    std::uint32_t head[2]{};
+    if(!server.read(head,8))throw std::runtime_error("No IPC frame header");
+    std::string json(head[1],'\0');if(head[1] && !server.read(json.data(),head[1]))throw std::runtime_error("Short IPC frame");
     op=head[0];return json;
 }
 int main(int argc,char** argv){try{
@@ -28,17 +67,16 @@ int main(int argc,char** argv){try{
     a.on_member("PSP_GAME/USRDIR/bind/result.bin");check(seen.back().details=="Results: Watashi no Koi wa Hotchkiss","Results");
     a.on_member("PSP_GAME/USRDIR/bind/menu.bin");check(seen.back().state=="1 song played","Session count");
     a.on_member("PSP_GAME/USRDIR/bind/play_m02.bin");check(seen.back().details=="Playing Fuwa Fuwa Time" && seen.back().state.rfind("With the band",0)==0,"Band play");
-    // IPC against a private pipe.
-    const std::wstring prefix=L"\\\\.\\pipe\\kon-discord-test-"+std::to_wstring(GetCurrentProcessId())+L"-";
-    HANDLE server=CreateNamedPipeW((prefix+L"0").c_str(),PIPE_ACCESS_DUPLEX,PIPE_TYPE_BYTE|PIPE_READMODE_BYTE|PIPE_WAIT,1,65536,65536,0,nullptr);
-    check(server!=INVALID_HANDLE_VALUE,"Test pipe");
+    // IPC against a private endpoint.
+    {TestServer server;
+    check(server.ready(),"Test pipe");
     {
-        DiscordPresence discord("123456789012345678","logo",prefix);
+        DiscordPresence discord("123456789012345678","logo",server.prefix);
         discord.update(seen.back());
-        check(ConnectNamedPipe(server,nullptr) || GetLastError()==ERROR_PIPE_CONNECTED,"Client connects");
+        check(server.accept(),"Client connects");
         std::uint32_t op=9;auto hello=read_frame(server,op);
         check(op==0 && hello=="{\"v\":1,\"client_id\":\"123456789012345678\"}","Handshake");
-        const auto ready=discord_frame(1,"{\"cmd\":\"DISPATCH\",\"evt\":\"READY\"}");DWORD put=0;WriteFile(server,ready.data(),DWORD(ready.size()),&put,nullptr);
+        server.write(discord_frame(1,"{\"cmd\":\"DISPATCH\",\"evt\":\"READY\"}"));
         auto activity=read_frame(server,op);
         check(op==1 && activity.find("\"cmd\":\"SET_ACTIVITY\"")!=std::string::npos && activity.find("Playing Fuwa Fuwa Time")!=std::string::npos
             && activity.find("\"large_image\":\"logo\"")!=std::string::npos && activity.find("\"start\":")!=std::string::npos,"SET_ACTIVITY with the presence");
@@ -46,7 +84,7 @@ int main(int argc,char** argv){try{
         activity=read_frame(server,op);check(activity.find("Don't say \\\"lazy\\\"")!=std::string::npos,"JSON escaping");
     }
     std::uint32_t op=0;const auto bye=read_frame(server,op);check(bye.find("\"nonce\":\"bye\"")!=std::string::npos,"Presence cleared on exit");
-    CloseHandle(server);
+    }
     unsigned found=0;
     if(argc>1 && std::filesystem::exists(argv[1])){
         const auto index=CpkIndex::load(argv[1]);check(index && index->size()>1000,"std.cpk index");

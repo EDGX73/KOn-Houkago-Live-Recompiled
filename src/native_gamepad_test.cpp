@@ -19,7 +19,7 @@ int main(){try{
     s=parse_dualshock4(ds4bt);check(s.valid && s.buttons==(circle|l) && s.y==255,"DualShock 4 Bluetooth report");
     // DualSense USB: Triangle + Square, hat up-left, R1, Create (select).
     std::vector<std::uint8_t> ds5(64,0);ds5[0]=0x01;ds5[1]=ds5[2]=128;ds5[8]=0x80|0x10|7;ds5[9]=0x02|0x10;
-    s=parse_dualsense(ds5);check(s.valid && s.buttons==(triangle|square|up|left|r|select),"DualSense USB report");
+    s=parse_dualsense(ds5);check(s.valid && s.buttons==(triangle|square|up|left|r|psp_button::select),"DualSense USB report");  // qualified: POSIX also has ::select
     // DualSense Bluetooth 0x31: Cross only.
     std::vector<std::uint8_t> ds5bt(78,0);ds5bt[0]=0x31;ds5bt[2]=ds5bt[3]=128;ds5bt[9]=0x20|8;
     s=parse_dualsense(ds5bt);check(s.valid && s.buttons==cross,"DualSense Bluetooth report");
@@ -44,7 +44,7 @@ int main(){try{
     check(enter_circle && x_gone,"Keyboard remap replaces the default key");
     // Xbox: physical B (positional Cross) now presses Circle, A presses Cross, RB presses L.
     check(map.route(InputStyle::Xbox,cross)==circle && map.route(InputStyle::Xbox,circle)==cross && (map.route(InputStyle::Xbox,r)&l) && map.label(InputStyle::Xbox,circle)=="B" && map.label(InputStyle::Xbox,l)=="RB","Xbox remap and labels");
-    check(map.route(InputStyle::Nintendo,select)==(select|start) && map.route(InputStyle::Nintendo,start)==0 && map.label(InputStyle::Nintendo,start)=="-","Nintendo remap");
+    check(map.route(InputStyle::Nintendo,psp_button::select)==(psp_button::select|start) && map.route(InputStyle::Nintendo,start)==0 && map.label(InputStyle::Nintendo,start)=="-","Nintendo remap");
     check((map.generic().buttons[6]&cross) && map.generic().buttons[1]==0 && map.label(InputStyle::Generic,cross)=="7","Generic remap");
     check(!ButtonMap::template_text().empty() && map.route(InputStyle::Xbox,up)==up,"Template and untouched d-pad");
     std::cout<<"PASS: DualShock 4 (USB, Bluetooth), DualSense (USB, Bluetooth), Switch Pro (full, simple) and generic HID report parsing, positional PSP mapping, styles and controls.ini remapping; no physical controller tested\n";return 0;

@@ -1,0 +1,92 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">K-On! Hokago Live!! Recompiled</string>
+    <string name="header_subtitle">Port nativo para Android</string>
+    <string name="version_format">Versión %1$s (código %2$d) · Android %3$s (API %4$d) · %5$s</string>
+
+    <string name="section_updates">Actualizaciones</string>
+    <string name="updates_description">Busca la última versión estable publicada en GitHub. Antes de instalar se comprueban el SHA-256 y la firma del APK; las partidas y los ajustes no se tocan.</string>
+    <string name="button_check_updates">Buscar actualizaciones</string>
+
+    <string name="section_play">Jugar</string>
+    <string name="play_description">Elige tu propia ISO para extraer los datos del juego y pulsa «Preparar juego» para compilarlo en el teléfono. Como alternativa, puedes importar un paquete game.kon generado en el PC con esa misma ISO. Esta APK no incluye el juego ni sus datos.</string>
+    <string name="button_play">Jugar</string>
+    <string name="button_install_iso">Elegir ISO…</string>
+    <string name="button_import_game">Importar juego (game.kon)…</string>
+    <string name="button_prepare_game">Preparar juego en el teléfono…</string>
+    <string name="button_cancel_build">Cancelar preparación</string>
+    <string name="prepare_missing_tools">Esta APK todavía no incluye el toolchain de compilación (%1$s). Se añadirá en la versión con preparación en el móvil.</string>
+    <string name="prepare_started">Preparando el juego…</string>
+    <string name="build_cancelling">Cancelando la preparación…</string>
+    <string name="build_phase_toolchain">Preparando el toolchain…</string>
+    <string name="build_phase_decrypt">Descifrando el ejecutable…</string>
+    <string name="build_phase_codegen">Traduciendo el código del juego (%1$d unidades)…</string>
+    <string name="build_phase_compile">Compilando %1$d de %2$d…</string>
+    <string name="build_phase_link">Enlazando el módulo…</string>
+    <string name="build_phase_install">Instalando el módulo…</string>
+    <string name="build_done">Juego preparado. Pulsa Jugar.</string>
+    <string name="build_cancelled">Preparación cancelada. Puedes reanudarla con Preparar juego.</string>
+    <string name="build_interrupted">La preparación se interrumpió. Pulsa Preparar juego para continuar donde se quedó.</string>
+    <string name="build_error">Error al preparar el juego: %1$s</string>
+    <string name="build_notification_channel">Preparación del juego</string>
+    <string name="build_notification_channel_description">Progreso de la compilación del juego en el teléfono.</string>
+    <string name="build_notification_title">Preparando K-On!</string>
+    <string name="module_stale">El módulo es de otra ISO o de otra versión del toolchain: vuelve a preparar el juego.</string>
+    <string name="module_abi_mismatch">El módulo usa una ABI distinta a la de esta app: vuelve a prepararlo.</string>
+    <string name="module_invalid">Los metadatos del módulo no son válidos: vuelve a preparar el juego.</string>
+    <string name="play_missing_module">Falta el módulo del juego. Pulsa «Preparar juego» para generarlo en el teléfono, o importa un game.kon generado en el PC.</string>
+    <string name="game_pack_importing">Importando el módulo del juego…</string>
+    <string name="game_pack_done">Módulo importado (%1$d archivos). Pulsa Jugar.</string>
+    <string name="game_pack_error">No se pudo importar el juego: %1$s</string>
+    <string name="play_ready">Juego preparado. Pulsa Jugar para empezar.</string>
+    <string name="play_missing_iso">Falta la ISO. Elige tu copia original (japonesa o traducción inglesa) para extraer los datos.</string>
+    <string name="play_missing_elf">Falta el ejecutable del juego (pkon.elf). Usa la APK jugable preparada en el PC.</string>
+    <string name="play_no_library">Esta APK no pudo cargar el runtime del juego. Reinstala la APK.</string>
+    <string name="iso_pick_title">Elige tu ISO de K-On! Houkago Live!!</string>
+    <string name="iso_installing">Extrayendo los datos de la ISO…</string>
+    <string name="iso_installed">ISO preparada (%1$s).</string>
+    <string name="iso_error">No se pudo preparar la ISO: %1$s</string>
+
+    <string name="section_saves">Partidas y ajustes</string>
+    <string name="saves_description">Exporta o importa un ZIP con las partidas (userdata) y los ajustes (config). Importar reemplaza los datos actuales de la app.</string>
+    <string name="button_export">Exportar partidas…</string>
+    <string name="button_import">Importar partidas…</string>
+
+    <string name="section_diagnostics">Diagnóstico</string>
+    <string name="diagnostics_description">Comprueba el decodificador PSPRecomp incluido (solo código del runtime, sin datos del juego). Debe mostrar PASS en todas las líneas.</string>
+    <string name="button_diagnostics">Ejecutar diagnóstico</string>
+
+    <string name="footer_no_game_data">Este APK no contiene la ISO, std.cpk, snd.cpk, EBOOT, el corpus recompilado ni partidas. Es la base pública de la 0.2: el juego se integra en una fase posterior.</string>
+
+    <string name="status_idle">Listo.</string>
+    <string name="status_checking">Consultando las releases de GitHub…</string>
+    <string name="status_no_release">Todavía no hay ninguna release estable con APK de Android y manifiesto.</string>
+    <string name="status_up_to_date">Ya tienes la última versión instalada (código %1$d). La release %2$s publica el código %3$d.</string>
+    <string name="status_error">Error: %1$s</string>
+    <string name="status_downloading">Descargando la versión %1$s…</string>
+    <string name="status_verifying">Comprobando el SHA-256 y la firma del APK…</string>
+    <string name="status_verified">APK verificado. Abriendo el instalador del sistema…</string>
+    <string name="status_install_prompt">Confirma la instalación en el diálogo del sistema.</string>
+    <string name="status_install_permission">Permite instalar apps desconocidas para esta app y vuelve a intentarlo.</string>
+    <string name="status_exporting">Exportando partidas y ajustes…</string>
+    <string name="status_export_done">Exportación terminada: %1$d archivos.</string>
+    <string name="status_importing">Importando partidas y ajustes…</string>
+    <string name="status_import_done">Importación terminada: %1$d archivos. Copia de seguridad: %2$s</string>
+    <string name="status_import_cancelled">Importación cancelada.</string>
+    <string name="status_diagnostics_running">Ejecutando el diagnóstico nativo…</string>
+    <string name="status_diagnostics_pass">Diagnóstico completado: todas las pruebas PASS.</string>
+    <string name="status_diagnostics_fail">Diagnóstico completado con FAIL. Revisa el informe.</string>
+
+    <string name="update_title">Actualización %1$s</string>
+    <string name="update_message">La release %1$s publica la versión %2$s (código %3$d, %4$s).\n\nSe descargará el APK, se comprobarán su SHA-256 y su firma, y se abrirá el instalador del sistema. Las partidas y los ajustes de la app no se borran.</string>
+    <string name="button_download_install">Descargar e instalar</string>
+    <string name="cancel">Cancelar</string>
+
+    <string name="install_permission_title">Permiso necesario</string>
+    <string name="install_permission_message">Android necesita permiso para instalar apps desconocidas desde esta app. Actívalo en Ajustes y vuelve a intentarlo.</string>
+    <string name="button_open_settings">Abrir ajustes</string>
+
+    <string name="import_confirm_title">Importar partidas</string>
+    <string name="import_confirm_message">Importar reemplazará todas las partidas y ajustes actuales de la app.\n\nAntes de reemplazarlos se guardará una copia de seguridad en la caché de la app.\n\n¿Quieres continuar?</string>
+    <string name="button_import_confirm">Importar y reemplazar</string>
+</resources>

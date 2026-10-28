@@ -1,12 +1,5 @@
-#ifndef WIN32_LEAN_AND_MEAN
-#define WIN32_LEAN_AND_MEAN
-#endif
-#ifndef NOMINMAX
-#define NOMINMAX
-#endif
-#include <winsock2.h>
-#include <ws2tcpip.h>
-#include <windows.h>
+#include "platform/net.hpp"
+#include "platform/process.hpp"
 #include "native_adhoc.hpp"
 #include "native_network.hpp"
 #include <algorithm>
@@ -19,7 +12,9 @@
 #include <mutex>
 #include <sstream>
 #include <thread>
+#ifdef _WIN32
 #pragma comment(lib,"ws2_32.lib")
+#endif
 namespace kon {
 namespace {
 constexpr const char* kMulticastGroup="239.255.75.75";
@@ -29,8 +24,8 @@ void put16(std::vector<std::uint8_t>& b,std::uint16_t v){b.push_back(std::uint8_
 std::uint16_t get16(const std::uint8_t* p){return std::uint16_t(p[0]|(p[1]<<8));}
 void put32(std::vector<std::uint8_t>& b,std::uint32_t v){for(unsigned n=0;n<4;++n)b.push_back(std::uint8_t(v>>(8*n)));}
 std::uint32_t get32(const std::uint8_t* p){return std::uint32_t(p[0])|(std::uint32_t(p[1])<<8)|(std::uint32_t(p[2])<<16)|(std::uint32_t(p[3])<<24);}
-void nonblocking(SOCKET s){u_long on=1;ioctlsocket(s,FIONBIO,&on);}
-bool would_block(){const int e=WSAGetLastError();return e==WSAEWOULDBLOCK || e==WSAEINPROGRESS || e==WSAEALREADY;}
+void nonblocking(platform::Socket s){platform::set_nonblocking(s);}
+bool would_block(){return platform::would_block();}
 }
 struct AdhocNet::Impl {
     enum class Role : std::uint8_t {None=0,Host=1,Member=2};
@@ -39,13 +34,13 @@ struct AdhocNet::Impl {
     enum class PtpKind {Open,Listen,Connecting,Established,Closed};
     // A PTP stream is a TCP connection, or (relayed) a virtual stream through
     // the online relay named by its opener's MAC and the opener's id for it.
-    struct Pending {SOCKET socket=INVALID_SOCKET;Accepted accepted;bool relayed=false;Mac opener{};std::uint32_t stream=0;};
-    struct Ptp {PtpKind kind=PtpKind::Open;std::uint16_t port=0,peer_port=0;Mac peer{};SOCKET socket=INVALID_SOCKET;bool hello_sent=false;std::deque<Pending> backlog;
+    struct Pending {platform::Socket socket=platform::invalid_socket;Accepted accepted;bool relayed=false;Mac opener{};std::uint32_t stream=0;};
+    struct Ptp {PtpKind kind=PtpKind::Open;std::uint16_t port=0,peer_port=0;Mac peer{};platform::Socket socket=platform::invalid_socket;bool hello_sent=false;std::deque<Pending> backlog;
         bool relayed=false,remote_closed=false;Mac opener{};std::uint32_t stream=0;std::deque<std::uint8_t> rx;};
-    struct Incoming {SOCKET socket=INVALID_SOCKET;std::vector<std::uint8_t> hello;std::uint64_t since=0;};
+    struct Incoming {platform::Socket socket=platform::invalid_socket;std::vector<std::uint8_t> hello;std::uint64_t since=0;};
     mutable std::mutex mutex;
     bool wsa=false,ready=false;
-    SOCKET discovery=INVALID_SOCKET,data=INVALID_SOCKET,listener=INVALID_SOCKET;
+    platform::Socket discovery=platform::invalid_socket,data=platform::invalid_socket,listener=platform::invalid_socket;
     std::uint16_t discovery_base=41500,discovery_port=0,data_port=0,tcp_port=0;bool lan=true;
     Mac mac{};std::string nickname,product;
     Role role=Role::None;std::array<char,8> group{};bool connect_announced=false;
@@ -59,20 +54,20 @@ struct AdhocNet::Impl {
     // Online relay. Frame: u32 length (little endian, of what follows), type,
     // destination MAC, source MAC, payload. The relay forwards each frame to
     // the client with that MAC, or to every other client for the broadcast MAC.
-    struct Link {SOCKET socket=INVALID_SOCKET;std::vector<std::uint8_t> rx,tx;Mac mac{};bool known=false;std::deque<std::pair<std::uint64_t,std::vector<std::uint8_t>>> delayed;};
+    struct Link {platform::Socket socket=platform::invalid_socket;std::vector<std::uint8_t> rx,tx;Mac mac{};bool known=false;std::deque<std::pair<std::uint64_t,std::vector<std::uint8_t>>> delayed;};
     // Diagnostic: KON_RELAY_DELAY_MS holds every relayed frame that long (Internet latency, one way).
     static std::uint64_t relay_delay_us(){static const std::uint64_t us=[]{const char* v=std::getenv("KON_RELAY_DELAY_MS");return v?std::strtoull(v,nullptr,10)*1000u:0u;}();return us;}
     Link relay;std::string relay_host;std::uint16_t relay_port=0;std::uint64_t relay_generation=0,relay_retry=0;bool relay_connecting=false;std::string relay_error;
-    SOCKET hub=INVALID_SOCKET;std::uint16_t hub_port=0;std::vector<Link> hub_clients;
+    platform::Socket hub=platform::invalid_socket;std::uint16_t hub_port=0;std::vector<Link> hub_clients;
     std::vector<std::thread> connectors;
     static void queue_frame(Link& l,char type,const Mac& to,const Mac& from,const std::uint8_t* p,std::size_t n){
         const std::uint32_t length=std::uint32_t(13+n);const auto at=l.tx.size();l.tx.resize(at+4+length);
         std::memcpy(&l.tx[at],&length,4);l.tx[at+4]=std::uint8_t(type);std::copy(to.begin(),to.end(),l.tx.begin()+std::ptrdiff_t(at+5));std::copy(from.begin(),from.end(),l.tx.begin()+std::ptrdiff_t(at+11));
         if(n)std::memcpy(&l.tx[at+17],p,n);
     }
-    void relay_send(char type,const Mac& to,const std::vector<std::uint8_t>& payload){if(relay.socket!=INVALID_SOCKET)queue_frame(relay,type,to,mac,payload.data(),payload.size());}
+    void relay_send(char type,const Mac& to,const std::vector<std::uint8_t>& payload){if(relay.socket!=platform::invalid_socket)queue_frame(relay,type,to,mac,payload.data(),payload.size());}
     static bool flush(Link& l){
-        while(!l.tx.empty()){const int n=send(l.socket,reinterpret_cast<const char*>(l.tx.data()),int(std::min<std::size_t>(l.tx.size(),1u<<20)),0);
+        while(!l.tx.empty()){const int n=send(l.socket,reinterpret_cast<const char*>(l.tx.data()),int(std::min<std::size_t>(l.tx.size(),1u<<20)),platform::send_flags);
             if(n<=0)return n<0 && would_block();l.tx.erase(l.tx.begin(),l.tx.begin()+n);}
         return true;
     }
@@ -93,8 +88,8 @@ struct AdhocNet::Impl {
         l.rx.erase(l.rx.begin(),l.rx.begin()+std::ptrdiff_t(at));return true;
     }
     void run_hub(){
-        if(hub==INVALID_SOCKET)return;
-        for(;;){const SOCKET s=accept(hub,nullptr,nullptr);if(s==INVALID_SOCKET)break;nonblocking(s);BOOL on=TRUE;setsockopt(s,IPPROTO_TCP,TCP_NODELAY,reinterpret_cast<const char*>(&on),sizeof on);Link l;l.socket=s;hub_clients.push_back(std::move(l));}
+        if(hub==platform::invalid_socket)return;
+        for(;;){const platform::Socket s=accept(hub,nullptr,nullptr);if(s==platform::invalid_socket)break;nonblocking(s);int on=1;setsockopt(s,IPPROTO_TCP,TCP_NODELAY,reinterpret_cast<const char*>(&on),sizeof on);Link l;l.socket=s;hub_clients.push_back(std::move(l));}
         for(std::size_t n=0;n<hub_clients.size();++n){
             const bool alive=pump(hub_clients[n],[&](char,const Mac& to,const Mac& from,const std::uint8_t*,std::size_t,const std::uint8_t* whole,std::size_t size){
                 hub_clients[n].mac=from;hub_clients[n].known=true;
@@ -102,11 +97,11 @@ struct AdhocNet::Impl {
                 {if(relay_delay_us())hub_clients[m].delayed.push_back({now_us()+relay_delay_us(),std::vector<std::uint8_t>(whole,whole+size)});
                  else hub_clients[m].tx.insert(hub_clients[m].tx.end(),whole,whole+size);}
             });
-            if(!alive){closesocket(hub_clients[n].socket);hub_clients[n].socket=INVALID_SOCKET;}
+            if(!alive){platform::close_socket(hub_clients[n].socket);hub_clients[n].socket=platform::invalid_socket;}
         }
         for(auto& c:hub_clients)while(!c.delayed.empty() && c.delayed.front().first<=now_us()){c.tx.insert(c.tx.end(),c.delayed.front().second.begin(),c.delayed.front().second.end());c.delayed.pop_front();}
-        for(auto& c:hub_clients)if(c.socket!=INVALID_SOCKET && !flush(c)){closesocket(c.socket);c.socket=INVALID_SOCKET;}
-        std::erase_if(hub_clients,[](const Link& l){return l.socket==INVALID_SOCKET;});
+        for(auto& c:hub_clients)if(c.socket!=platform::invalid_socket && !flush(c)){platform::close_socket(c.socket);c.socket=platform::invalid_socket;}
+        std::erase_if(hub_clients,[](const Link& l){return l.socket==platform::invalid_socket;});
     }
     // Connects in the background (name resolution and TCP connect can take
     // seconds); the link is installed if nothing changed meanwhile.
@@ -114,28 +109,28 @@ struct AdhocNet::Impl {
         if(relay_connecting || relay_host.empty())return;
         relay_connecting=true;const auto host=relay_host;const auto port=relay_port;const auto generation=relay_generation;
         connectors.emplace_back([this,host,port,generation]{
-            SOCKET s=INVALID_SOCKET;std::string error="address not found";
+            platform::Socket s=platform::invalid_socket;std::string error="no se encontró la dirección";
             addrinfo hints{};hints.ai_socktype=SOCK_STREAM;hints.ai_protocol=IPPROTO_TCP;addrinfo* list=nullptr;
             if(getaddrinfo(host.c_str(),std::to_string(port).c_str(),&hints,&list))list=nullptr;
-            for(auto* a=list;a && s==INVALID_SOCKET;a=a->ai_next){
-                SOCKET t=socket(a->ai_family,SOCK_STREAM,IPPROTO_TCP);if(t==INVALID_SOCKET)continue;nonblocking(t);
-                if(connect(t,a->ai_addr,int(a->ai_addrlen)) && !would_block()){closesocket(t);continue;}
+            for(auto* a=list;a && s==platform::invalid_socket;a=a->ai_next){
+                platform::Socket t=socket(a->ai_family,SOCK_STREAM,IPPROTO_TCP);if(t==platform::invalid_socket)continue;nonblocking(t);
+                if(connect(t,a->ai_addr,int(a->ai_addrlen)) && !would_block()){platform::close_socket(t);continue;}
                 fd_set w,e;FD_ZERO(&w);FD_ZERO(&e);FD_SET(t,&w);FD_SET(t,&e);timeval wait{6,0};
-                if(select(0,nullptr,&w,&e,&wait)>0 && FD_ISSET(t,&w) && !FD_ISSET(t,&e)){s=t;break;}
-                closesocket(t);error="no answer (closed port or firewall)";
+                if(select(platform::select_bound({t}),nullptr,&w,&e,&wait)>0 && FD_ISSET(t,&w) && !FD_ISSET(t,&e)){s=t;break;}
+                platform::close_socket(t);error="sin respuesta: puerto cerrado o cortafuegos";
             }
             if(list)freeaddrinfo(list);
-            if(s!=INVALID_SOCKET){BOOL on=TRUE;setsockopt(s,IPPROTO_TCP,TCP_NODELAY,reinterpret_cast<const char*>(&on),sizeof on);}
+            if(s!=platform::invalid_socket){int on=1;setsockopt(s,IPPROTO_TCP,TCP_NODELAY,reinterpret_cast<const char*>(&on),sizeof on);}
             std::lock_guard lock(mutex);relay_connecting=false;
-            if(generation!=relay_generation || stop.load()){if(s!=INVALID_SOCKET)closesocket(s);return;}
-            if(s==INVALID_SOCKET){relay_error=error;relay_retry=now_us()+3000000;return;}
+            if(generation!=relay_generation || stop.load()){if(s!=platform::invalid_socket)platform::close_socket(s);return;}
+            if(s==platform::invalid_socket){relay_error=error;relay_retry=now_us()+3000000;return;}
             relay={};relay.socket=s;relay_error.clear();send_beacon();
         });
     }
     void run_relay(){
-        if(relay.socket==INVALID_SOCKET){if(!relay_host.empty() && now_us()>=relay_retry)start_relay_connect();return;}
+        if(relay.socket==platform::invalid_socket){if(!relay_host.empty() && now_us()>=relay_retry)start_relay_connect();return;}
         const bool alive=pump(relay,[&](char type,const Mac&,const Mac& from,const std::uint8_t* p,std::size_t n,const std::uint8_t*,std::size_t){on_relay_frame(type,from,p,n);});
-        if(!alive || !flush(relay)){closesocket(relay.socket);relay={};relay_retry=now_us()+2000000;relay_error="the connection to the room was lost";
+        if(!alive || !flush(relay)){platform::close_socket(relay.socket);relay={};relay_retry=now_us()+2000000;relay_error="se perdió la conexión con la sala";
             for(auto it=peers.begin();it!=peers.end();)if(it->second.relayed)it=peers.erase(it);else ++it;}
     }
     Ptp* relayed_stream(const Mac& opener,std::uint32_t stream,const Mac& from){
@@ -226,9 +221,9 @@ struct AdhocNet::Impl {
     // listener of that PTP port (answer 1) or refuse them (answer 0).
     void process_incoming(){
         for(;;){
-            sockaddr_in from{};int length=sizeof from;const SOCKET s=accept(listener,reinterpret_cast<sockaddr*>(&from),&length);
-            if(s==INVALID_SOCKET)break;
-            nonblocking(s);BOOL on=TRUE;setsockopt(s,IPPROTO_TCP,TCP_NODELAY,reinterpret_cast<const char*>(&on),sizeof on);
+            sockaddr_in from{};platform::SockLen length=sizeof from;const platform::Socket s=accept(listener,reinterpret_cast<sockaddr*>(&from),&length);
+            if(s==platform::invalid_socket)break;
+            nonblocking(s);int on=1;setsockopt(s,IPPROTO_TCP,TCP_NODELAY,reinterpret_cast<const char*>(&on),sizeof on);
             incoming.push_back({s,{},now_us()});
         }
         for(auto it=incoming.begin();it!=incoming.end();){
@@ -236,13 +231,13 @@ struct AdhocNet::Impl {
             const int got=recv(it->socket,reinterpret_cast<char*>(buffer),want,0);
             if(got>0)it->hello.insert(it->hello.end(),buffer,buffer+got);
             const bool failed=got==0 || (got<0 && !would_block()) || now_us()-it->since>5000000;
-            if(failed){closesocket(it->socket);it=incoming.erase(it);continue;}
+            if(failed){platform::close_socket(it->socket);it=incoming.erase(it);continue;}
             if(it->hello.size()<14){++it;continue;}
             Accepted a;bool valid=!std::memcmp(it->hello.data(),"KONP",4);
             std::copy_n(it->hello.data()+4,6,a.peer.begin());a.port=get16(it->hello.data()+10);const auto to_port=get16(it->hello.data()+12);
             Ptp* target=nullptr;for(auto& [id,p]:ptp)if(p.kind==PtpKind::Listen && p.port==to_port){target=&p;break;}
-            const char answer=valid && target?1:0;send(it->socket,&answer,1,0);
-            if(answer){Pending e;e.socket=it->socket;e.accepted=a;target->backlog.push_back(e);}else closesocket(it->socket);
+            const char answer=valid && target?1:0;send(it->socket,&answer,1,platform::send_flags);
+            if(answer){Pending e;e.socket=it->socket;e.accepted=a;target->backlog.push_back(e);}else platform::close_socket(it->socket);
             it=incoming.erase(it);
         }
     }
@@ -250,10 +245,10 @@ struct AdhocNet::Impl {
         std::vector<std::uint8_t> buffer(65536);
         while(!stop.load()){
             fd_set read;FD_ZERO(&read);FD_SET(discovery,&read);FD_SET(data,&read);
-            timeval wait{0,20000};select(0,&read,nullptr,nullptr,&wait);
+            timeval wait{0,20000};select(platform::select_bound({discovery,data}),&read,nullptr,nullptr,&wait);
             std::lock_guard lock(mutex);
-            for(const SOCKET s:{discovery,data})for(;;){
-                sockaddr_in from{};int length=sizeof from;
+            for(const platform::Socket s:{discovery,data})for(;;){
+                sockaddr_in from{};platform::SockLen length=sizeof from;
                 const int got=recvfrom(s,reinterpret_cast<char*>(buffer.data()),int(buffer.size()),0,reinterpret_cast<sockaddr*>(&from),&length);
                 if(got<=0)break;
                 if(s==discovery)on_beacon(buffer.data(),got,from);else on_data(buffer.data(),got);
@@ -269,9 +264,9 @@ struct AdhocNet::Impl {
         sendto(data,reinterpret_cast<const char*>(b.data()),int(b.size()),0,reinterpret_cast<sockaddr*>(&to),sizeof to);
     }
     void close_ptp(Ptp& p){
-        if(p.socket!=INVALID_SOCKET){closesocket(p.socket);p.socket=INVALID_SOCKET;}
+        if(p.socket!=platform::invalid_socket){platform::close_socket(p.socket);p.socket=platform::invalid_socket;}
         if(p.relayed && p.kind==PtpKind::Established && !p.remote_closed)send_stream(p,'C',nullptr,0);
-        for(auto& e:p.backlog){if(e.socket!=INVALID_SOCKET)closesocket(e.socket);else if(e.relayed){Ptp refused;refused.relayed=true;refused.opener=e.opener;refused.stream=e.stream;refused.peer=e.accepted.peer;send_stream(refused,'C',nullptr,0);}}
+        for(auto& e:p.backlog){if(e.socket!=platform::invalid_socket)platform::close_socket(e.socket);else if(e.relayed){Ptp refused;refused.relayed=true;refused.opener=e.opener;refused.stream=e.stream;refused.peer=e.accepted.peer;send_stream(refused,'C',nullptr,0);}}
         p.backlog.clear();p.kind=PtpKind::Closed;
     }
 };
@@ -282,12 +277,12 @@ AdhocNet::AdhocNet(std::string nickname,Options options):impl_(std::make_unique<
     else{
         Mac base{0x02,0x4B,0x4F,0x4E,0x00,0x00};
         try{if(const auto host=host_ethernet_address())base=*host;}catch(...){}
-        const auto pid=GetCurrentProcessId();
+        const auto pid=platform::current_process_id();
         i.mac=base;i.mac[0]=std::uint8_t((base[0]|0x02)&0xFE);i.mac[3]^=std::uint8_t(pid>>16);i.mac[4]^=std::uint8_t(pid>>8);i.mac[5]^=std::uint8_t(pid);
     }
-    WSADATA wsa{};if(WSAStartup(MAKEWORD(2,2),&wsa))return;i.wsa=true;
+    if(!platform::network_start())return;i.wsa=true;
     i.discovery=socket(AF_INET,SOCK_DGRAM,IPPROTO_UDP);i.data=socket(AF_INET,SOCK_DGRAM,IPPROTO_UDP);i.listener=socket(AF_INET,SOCK_STREAM,IPPROTO_TCP);
-    if(i.discovery==INVALID_SOCKET || i.data==INVALID_SOCKET || i.listener==INVALID_SOCKET)return;
+    if(i.discovery==platform::invalid_socket || i.data==platform::invalid_socket || i.listener==platform::invalid_socket)return;
     // One discovery port per instance (the first free one of the range).
     sockaddr_in any{};any.sin_family=AF_INET;any.sin_addr.s_addr=htonl(i.lan?INADDR_ANY:INADDR_LOOPBACK);
     for(unsigned n=0;n<kInstances && !i.discovery_port;++n){any.sin_port=htons(std::uint16_t(i.discovery_base+n));if(!bind(i.discovery,reinterpret_cast<sockaddr*>(&any),sizeof any))i.discovery_port=std::uint16_t(i.discovery_base+n);}
@@ -295,23 +290,23 @@ AdhocNet::AdhocNet(std::string nickname,Options options):impl_(std::make_unique<
     if(i.lan){
         ip_mreq group{};inet_pton(AF_INET,kMulticastGroup,&group.imr_multiaddr);group.imr_interface.s_addr=htonl(INADDR_ANY);
         setsockopt(i.discovery,IPPROTO_IP,IP_ADD_MEMBERSHIP,reinterpret_cast<const char*>(&group),sizeof group);
-        DWORD ttl=1;setsockopt(i.discovery,IPPROTO_IP,IP_MULTICAST_TTL,reinterpret_cast<const char*>(&ttl),sizeof ttl);
+        int ttl=1;setsockopt(i.discovery,IPPROTO_IP,IP_MULTICAST_TTL,reinterpret_cast<const char*>(&ttl),sizeof ttl);
     }
     any.sin_port=0;
     if(bind(i.data,reinterpret_cast<sockaddr*>(&any),sizeof any) || bind(i.listener,reinterpret_cast<sockaddr*>(&any),sizeof any) || listen(i.listener,SOMAXCONN))return;
-    sockaddr_in bound{};int length=sizeof bound;getsockname(i.data,reinterpret_cast<sockaddr*>(&bound),&length);i.data_port=ntohs(bound.sin_port);
+    sockaddr_in bound{};platform::SockLen length=sizeof bound;getsockname(i.data,reinterpret_cast<sockaddr*>(&bound),&length);i.data_port=ntohs(bound.sin_port);
     length=sizeof bound;getsockname(i.listener,reinterpret_cast<sockaddr*>(&bound),&length);i.tcp_port=ntohs(bound.sin_port);
-    for(const SOCKET s:{i.discovery,i.data,i.listener})nonblocking(s);
+    for(const platform::Socket s:{i.discovery,i.data,i.listener})nonblocking(s);
     i.ready=true;i.thread=std::thread([&i]{i.run();});
 }
 AdhocNet::~AdhocNet(){
     auto& i=*impl_;i.stop.store(true);if(i.thread.joinable())i.thread.join();
     for(auto& t:i.connectors)if(t.joinable())t.join();
-    for(auto& [id,p]:i.ptp)i.close_ptp(p);for(auto& in:i.incoming)closesocket(in.socket);
-    if(i.relay.socket!=INVALID_SOCKET){Impl::flush(i.relay);closesocket(i.relay.socket);}
-    for(auto& c:i.hub_clients)closesocket(c.socket);if(i.hub!=INVALID_SOCKET)closesocket(i.hub);
-    for(const SOCKET s:{i.discovery,i.data,i.listener})if(s!=INVALID_SOCKET)closesocket(s);
-    if(i.wsa)WSACleanup();
+    for(auto& [id,p]:i.ptp)i.close_ptp(p);for(auto& in:i.incoming)platform::close_socket(in.socket);
+    if(i.relay.socket!=platform::invalid_socket){Impl::flush(i.relay);platform::close_socket(i.relay.socket);}
+    for(auto& c:i.hub_clients)platform::close_socket(c.socket);if(i.hub!=platform::invalid_socket)platform::close_socket(i.hub);
+    for(const platform::Socket s:{i.discovery,i.data,i.listener})if(s!=platform::invalid_socket)platform::close_socket(s);
+    if(i.wsa)platform::network_stop();
 }
 const Mac& AdhocNet::mac()const{return impl_->mac;}
 bool AdhocNet::ok()const{return impl_->ready;}
@@ -391,8 +386,8 @@ AdhocNet::Status AdhocNet::ptp_connect(int id){
             p.relayed=true;p.opener=i.mac;p.stream=std::uint32_t(id);p.kind=Impl::PtpKind::Connecting;
             std::vector<std::uint8_t> open;put32(open,p.stream);put16(open,p.port);put16(open,p.peer_port);i.relay_send('O',p.peer,open);
             return Status::WouldBlock;}
-        p.socket=socket(AF_INET,SOCK_STREAM,IPPROTO_TCP);if(p.socket==INVALID_SOCKET)return Status::Refused;
-        nonblocking(p.socket);BOOL on=TRUE;setsockopt(p.socket,IPPROTO_TCP,TCP_NODELAY,reinterpret_cast<const char*>(&on),sizeof on);
+        p.socket=socket(AF_INET,SOCK_STREAM,IPPROTO_TCP);if(p.socket==platform::invalid_socket)return Status::Refused;
+        nonblocking(p.socket);int on=1;setsockopt(p.socket,IPPROTO_TCP,TCP_NODELAY,reinterpret_cast<const char*>(&on),sizeof on);
         sockaddr_in to=peer->address;to.sin_port=htons(peer->tcp_port);
         if(connect(p.socket,reinterpret_cast<sockaddr*>(&to),sizeof to) && !would_block()){i.close_ptp(p);return Status::Refused;}
         p.kind=Impl::PtpKind::Connecting;p.hello_sent=false;return Status::WouldBlock;}
@@ -400,10 +395,10 @@ AdhocNet::Status AdhocNet::ptp_connect(int id){
         if(p.relayed)return Status::WouldBlock; // until the listener answers through the relay
         if(!p.hello_sent){
             fd_set write,error;FD_ZERO(&write);FD_ZERO(&error);FD_SET(p.socket,&write);FD_SET(p.socket,&error);timeval zero{0,0};
-            if(select(0,nullptr,&write,&error,&zero)<=0)return Status::WouldBlock;
+            if(select(platform::select_bound({p.socket}),nullptr,&write,&error,&zero)<=0)return Status::WouldBlock;
             if(FD_ISSET(p.socket,&error)){i.close_ptp(p);return Status::Refused;}
             std::vector<std::uint8_t> hello{'K','O','N','P'};hello.insert(hello.end(),i.mac.begin(),i.mac.end());put16(hello,p.port);put16(hello,p.peer_port);
-            if(send(p.socket,reinterpret_cast<const char*>(hello.data()),int(hello.size()),0)!=int(hello.size())){i.close_ptp(p);return Status::Refused;}
+            if(send(p.socket,reinterpret_cast<const char*>(hello.data()),int(hello.size()),platform::send_flags)!=int(hello.size())){i.close_ptp(p);return Status::Refused;}
             p.hello_sent=true;
         }
         char answer=0;const int got=recv(p.socket,&answer,1,0);
@@ -426,7 +421,7 @@ AdhocNet::Status AdhocNet::ptp_send(int id,const std::uint8_t* data,std::size_t&
     std::lock_guard lock(impl_->mutex);auto& i=*impl_;const auto it=i.ptp.find(id);if(it==i.ptp.end())return Status::InvalidId;
     auto& p=it->second;if(p.kind!=Impl::PtpKind::Established){size=0;return p.kind==Impl::PtpKind::Closed?Status::Closed:Status::WouldBlock;}
     if(p.relayed){if(p.remote_closed){size=0;return Status::Closed;}size=std::min<std::size_t>(size,60000);i.send_stream(p,'S',data,size);return Status::Ok;}
-    const int sent=send(p.socket,reinterpret_cast<const char*>(data),int(std::min<std::size_t>(size,1u<<20)),0);
+    const int sent=send(p.socket,reinterpret_cast<const char*>(data),int(std::min<std::size_t>(size,1u<<20)),platform::send_flags);
     if(sent<0){size=0;if(would_block())return Status::WouldBlock;i.close_ptp(p);return Status::Closed;}
     size=std::size_t(sent);return Status::Ok;
 }
@@ -451,45 +446,45 @@ void AdhocNet::ptp_close(int id){
 }
 bool AdhocNet::online_host(std::uint16_t port){
     std::lock_guard lock(impl_->mutex);auto& i=*impl_;
-    if(i.hub==INVALID_SOCKET){
+    if(i.hub==platform::invalid_socket){
         // Dual stack: IPv6 and IPv4 players reach the same port. This PC only
         // (lan=false: tests) listens on 127.0.0.1, with no firewall prompt.
-        SOCKET s=socket(i.lan?AF_INET6:AF_INET,SOCK_STREAM,IPPROTO_TCP);if(s==INVALID_SOCKET){i.relay_error="no network";return false;}
-        DWORD off=0;if(i.lan)setsockopt(s,IPPROTO_IPV6,IPV6_V6ONLY,reinterpret_cast<const char*>(&off),sizeof off);
+        platform::Socket s=socket(i.lan?AF_INET6:AF_INET,SOCK_STREAM,IPPROTO_TCP);if(s==platform::invalid_socket){i.relay_error="sin red";return false;}
+        int off=0;if(i.lan)setsockopt(s,IPPROTO_IPV6,IPV6_V6ONLY,reinterpret_cast<const char*>(&off),sizeof off);
         sockaddr_in6 any{};any.sin6_family=AF_INET6;any.sin6_port=htons(port);
         sockaddr_in loop{};loop.sin_family=AF_INET;loop.sin_port=htons(port);loop.sin_addr.s_addr=htonl(INADDR_LOOPBACK);
         const bool bound=i.lan?!bind(s,reinterpret_cast<sockaddr*>(&any),sizeof any):!bind(s,reinterpret_cast<sockaddr*>(&loop),sizeof loop);
-        if(!bound || listen(s,SOMAXCONN)){closesocket(s);i.relay_error="port "+std::to_string(port)+" is in use";return false;}
+        if(!bound || listen(s,SOMAXCONN)){platform::close_socket(s);i.relay_error="el puerto "+std::to_string(port)+" está en uso";return false;}
         nonblocking(s);i.hub=s;i.hub_port=port;
     }
     i.relay_host="127.0.0.1";i.relay_port=port;++i.relay_generation;i.relay_retry=0;
-    if(i.relay.socket!=INVALID_SOCKET){closesocket(i.relay.socket);i.relay={};}
+    if(i.relay.socket!=platform::invalid_socket){platform::close_socket(i.relay.socket);i.relay={};}
     i.start_relay_connect();return true;
 }
 bool AdhocNet::online_join(const std::string& host,std::uint16_t port){
     std::lock_guard lock(impl_->mutex);auto& i=*impl_;
     if(host.empty() || !port)return false;
     i.relay_host=host;i.relay_port=port;++i.relay_generation;i.relay_retry=0;i.relay_error.clear();
-    if(i.relay.socket!=INVALID_SOCKET){closesocket(i.relay.socket);i.relay={};}
+    if(i.relay.socket!=platform::invalid_socket){platform::close_socket(i.relay.socket);i.relay={};}
     i.start_relay_connect();return true;
 }
 void AdhocNet::online_leave(){
     std::lock_guard lock(impl_->mutex);auto& i=*impl_;
     i.relay_host.clear();++i.relay_generation;
-    if(i.relay.socket!=INVALID_SOCKET){closesocket(i.relay.socket);i.relay={};}
-    for(auto& c:i.hub_clients)closesocket(c.socket);i.hub_clients.clear();
-    if(i.hub!=INVALID_SOCKET){closesocket(i.hub);i.hub=INVALID_SOCKET;i.hub_port=0;}
+    if(i.relay.socket!=platform::invalid_socket){platform::close_socket(i.relay.socket);i.relay={};}
+    for(auto& c:i.hub_clients)platform::close_socket(c.socket);i.hub_clients.clear();
+    if(i.hub!=platform::invalid_socket){platform::close_socket(i.hub);i.hub=platform::invalid_socket;i.hub_port=0;}
     for(auto it=i.peers.begin();it!=i.peers.end();)if(it->second.relayed)it=i.peers.erase(it);else ++it;
 }
 AdhocNet::OnlineState AdhocNet::online()const{
     std::lock_guard lock(impl_->mutex);const auto& i=*impl_;OnlineState s;
-    s.hosting=i.hub!=INVALID_SOCKET;s.linked=i.relay.socket!=INVALID_SOCKET;s.port=i.hub_port?i.hub_port:i.relay_port;s.error=i.relay_error;
+    s.hosting=i.hub!=platform::invalid_socket;s.linked=i.relay.socket!=platform::invalid_socket;s.port=i.hub_port?i.hub_port:i.relay_port;s.error=i.relay_error;
     if(s.linked){s.players=1;for(const auto& [m,p]:i.peers)if(p.relayed)++s.players;}
     return s;
 }
 std::string AdhocNet::describe()const{
     std::lock_guard lock(impl_->mutex);const auto& i=*impl_;std::ostringstream out;
-    out<<"ready="<<i.ready<<" lan="<<i.lan<<" discovery_port="<<i.discovery_port<<" role="<<int(i.role)<<" group="<<std::string(i.group.data(),strnlen(i.group.data(),8))<<" peers="<<i.peers.size()<<" pdp="<<i.pdp.size()<<" ptp="<<i.ptp.size()<<" data_port="<<i.data_port<<" tcp_port="<<i.tcp_port<<" relay="<<(i.relay.socket!=INVALID_SOCKET)<<" hub_clients="<<i.hub_clients.size();
+    out<<"ready="<<i.ready<<" lan="<<i.lan<<" discovery_port="<<i.discovery_port<<" role="<<int(i.role)<<" group="<<std::string(i.group.data(),strnlen(i.group.data(),8))<<" peers="<<i.peers.size()<<" pdp="<<i.pdp.size()<<" ptp="<<i.ptp.size()<<" data_port="<<i.data_port<<" tcp_port="<<i.tcp_port<<" relay="<<(i.relay.socket!=platform::invalid_socket)<<" hub_clients="<<i.hub_clients.size();
     return out.str();
 }
 }

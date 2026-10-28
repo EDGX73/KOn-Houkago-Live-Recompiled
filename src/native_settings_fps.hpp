@@ -1,6 +1,7 @@
 #pragma once
 #include "ge_queue.hpp"
 #include "psprecomp/guest_memory.hpp"
+#ifdef _WIN32
 #ifndef NOMINMAX
 #define NOMINMAX
 #endif
@@ -8,6 +9,7 @@
 #define WIN32_LEAN_AND_MEAN
 #endif
 #include <windows.h>
+#endif
 #include <algorithm>
 #include <array>
 #include <cstdint>
@@ -16,6 +18,39 @@
 #include <functional>
 #include <string>
 #include <vector>
+
+#ifdef __ANDROID__
+// The in-game Video row is drawn with GDI text; Android uses its own
+// settings UI in Java. Keep the same interface so the runtime compiles and the
+// game behaves as if the row were absent.
+namespace kon {
+class NativeSettingsFps {
+public:
+    static constexpr std::array<unsigned,4> kRates{30u,60u,120u,165u};
+    static constexpr std::array<unsigned,4> kScales{1u,2u,3u,4u};
+    static constexpr unsigned kTexWidth=256,kTexHeight=128;
+    static constexpr std::uint32_t kTexBytes=kTexWidth*kTexHeight*4u,kVertexSlots=512;
+    static constexpr std::uint32_t kScratchBytes=kTexBytes+kVertexSlots*48u;
+    static constexpr unsigned kRateChanged=1u,kScaleChanged=2u,kScreenChanged=4u,kLanguageChanged=8u;
+    using Draw=std::function<void(GeState&,unsigned,unsigned)>;
+    NativeSettingsFps(psprecomp::GuestMemory&,std::uint32_t,std::uint32_t){}
+    unsigned filter(std::uint32_t&){return 0;}
+    bool draw(const GeState&,unsigned,unsigned,const Draw&){return false;}
+    void frame_end(){}
+    bool screen_visible()const{return false;}
+    unsigned rate()const{return 30;}
+    unsigned scale()const{return 1;}
+    bool fullscreen()const{return true;}
+    std::string language()const{return "en";}
+    void set_rate(unsigned){}
+    void set_scale(unsigned){}
+    void set_scale_limit(unsigned){}
+    void set_fullscreen(bool){}
+    void set_language(const std::string&){}
+    void set_language_choice(bool){}
+};
+}
+#else
 
 // "Video" row in the game's own Settings screen.  The PSP-only "Install" row
 // (copy UMD data to the memory stick) has no purpose on PC, so its drawing is
@@ -205,7 +240,11 @@ private:
             "Language - English or Japanese",
             "the game restarts in it after Settings",
             "Left/Right change it - Circle next column"};
-        return row>=0 && row<3?(column_==0?rate:column_==1?scale:column_==2?screen:language)[row]:"";
+        static const char* language_one[3]={
+            "Language - install the other disc to change it",
+            "with one disc the language is fixed",
+            "the game restarts after Settings"};
+        return row>=0 && row<3?(column_==0?rate:column_==1?scale:column_==2?screen:(language_choice_?language:language_one))[row]:"";
     }
     unsigned help_glyph(int row,int col)const{
         if(row<0 || row>2 || col<0)return 0;const std::string line=help_line(row);
@@ -289,3 +328,4 @@ private:
     }
 };
 }
+#endif // __ANDROID__

@@ -1,0 +1,125 @@
+{
+  "about": "Accepted exceptions of tools/audit_public.py. Each entry needs a path pattern, the rule it lifts and the reason. Never add game data, personal data or secrets here.",
+  "allow": [
+    {
+      "path": "tools/apply_logic_rate_patch.py",
+      "rule": "game-code",
+      "reason": "PC frame-rate patch: anchors made of single translated instructions at documented addresses. It edits the code that the player's own PC generates from their own disc; it contains no game routine."
+    },
+    {
+      "path": "*recomp/patches/apply_logic_rate_patch.py",
+      "rule": "game-code",
+      "reason": "Same file as tools/apply_logic_rate_patch.py, shipped in the release so the launcher can patch the player's generated code."
+    },
+    {
+      "path": "*recomp/python/python312.dll",
+      "rule": "personal-path",
+      "reason": "CPython 3.12.10 embeddable package from python.org, unmodified: a sample user-profile path (a user named Barney) comes from CPython's own sources, not from this PC."
+    },
+    {
+      "path": "*recomp/zig/lib/std/*",
+      "rule": "personal-path",
+      "reason": "Zig 0.15.2 standard library sources, unmodified: test strings with example Windows profile paths."
+    },
+    {
+      "path": "*KOn-Houkago-Live-Recompiled-0.2.0-android.apk",
+      "rule": "large-binary",
+      "reason": "S24 private-test APK 0.2.0 (85,029,657 bytes) ships the on-device clang/LLVM/lld toolchain and NDK sysroot; audited 2026-10-28: no ISO, EBOOT, CPK, corpus, pkon.elf, libkon_game.so, saves or keys. Not published."
+    },
+    {
+      "path": "*KOn-Houkago-Live-Recompiled-0.2.0-android.apk!/assets/toolchain/lib/arm64-v8a/libLLVM.so",
+      "rule": "unexpected-binary",
+      "reason": "clang 21.1.8 / LLVM / lld / libc++ runtime libraries for on-device compilation; Apache-2.0 WITH LLVM-exception; license in the clang bundle (LICENSES/LLVM-Apache-2.0-LLVM-exception.txt). Audited AArch64, 16 KB pages, no game data."
+    },
+    {
+      "path": "*KOn-Houkago-Live-Recompiled-0.2.0-android.apk!/assets/toolchain/lib/arm64-v8a/libc++_shared.so",
+      "rule": "unexpected-binary",
+      "reason": "clang 21.1.8 / LLVM / lld / libc++ runtime libraries for on-device compilation; Apache-2.0 WITH LLVM-exception; license in the clang bundle (LICENSES/LLVM-Apache-2.0-LLVM-exception.txt). Audited AArch64, 16 KB pages, no game data."
+    },
+    {
+      "path": "*KOn-Houkago-Live-Recompiled-0.2.0-android.apk!/assets/toolchain/lib/arm64-v8a/libcharset.so",
+      "rule": "unexpected-binary",
+      "reason": "clang 21.1.8 / LLVM / lld / libc++ runtime libraries for on-device compilation; Apache-2.0 WITH LLVM-exception; license in the clang bundle (LICENSES/LLVM-Apache-2.0-LLVM-exception.txt). Audited AArch64, 16 KB pages, no game data."
+    },
+    {
+      "path": "*KOn-Houkago-Live-Recompiled-0.2.0-android.apk!/assets/toolchain/lib/arm64-v8a/libclang-cpp.so",
+      "rule": "unexpected-binary",
+      "reason": "clang 21.1.8 / LLVM / lld / libc++ runtime libraries for on-device compilation; Apache-2.0 WITH LLVM-exception; license in the clang bundle (LICENSES/LLVM-Apache-2.0-LLVM-exception.txt). Audited AArch64, 16 KB pages, no game data."
+    },
+    {
+      "path": "*KOn-Houkago-Live-Recompiled-0.2.0-android.apk!/assets/toolchain/lib/arm64-v8a/libffi.so",
+      "rule": "unexpected-binary",
+      "reason": "clang 21.1.8 / LLVM / lld / libc++ runtime libraries for on-device compilation; Apache-2.0 WITH LLVM-exception; license in the clang bundle (LICENSES/LLVM-Apache-2.0-LLVM-exception.txt). Audited AArch64, 16 KB pages, no game data."
+    },
+    {
+      "path": "*KOn-Houkago-Live-Recompiled-0.2.0-android.apk!/assets/toolchain/lib/arm64-v8a/libiconv.so",
+      "rule": "unexpected-binary",
+      "reason": "clang 21.1.8 / LLVM / lld / libc++ runtime libraries for on-device compilation; Apache-2.0 WITH LLVM-exception; license in the clang bundle (LICENSES/LLVM-Apache-2.0-LLVM-exception.txt). Audited AArch64, 16 KB pages, no game data."
+    },
+    {
+      "path": "*KOn-Houkago-Live-Recompiled-0.2.0-android.apk!/assets/toolchain/lib/arm64-v8a/liblzma.so.5",
+      "rule": "unexpected-binary",
+      "reason": "clang 21.1.8 / LLVM / lld / libc++ runtime libraries for on-device compilation; Apache-2.0 WITH LLVM-exception; license in the clang bundle (LICENSES/LLVM-Apache-2.0-LLVM-exception.txt). Audited AArch64, 16 KB pages, no game data."
+    },
+    {
+      "path": "*KOn-Houkago-Live-Recompiled-0.2.0-android.apk!/assets/toolchain/lib/arm64-v8a/libxml2.so.16",
+      "rule": "unexpected-binary",
+      "reason": "clang 21.1.8 / LLVM / lld / libc++ runtime libraries for on-device compilation; Apache-2.0 WITH LLVM-exception; license in the clang bundle (LICENSES/LLVM-Apache-2.0-LLVM-exception.txt). Audited AArch64, 16 KB pages, no game data."
+    },
+    {
+      "path": "*KOn-Houkago-Live-Recompiled-0.2.0-android.apk!/assets/toolchain/lib/arm64-v8a/libz.so.1",
+      "rule": "unexpected-binary",
+      "reason": "clang 21.1.8 / LLVM / lld / libc++ runtime libraries for on-device compilation; Apache-2.0 WITH LLVM-exception; license in the clang bundle (LICENSES/LLVM-Apache-2.0-LLVM-exception.txt). Audited AArch64, 16 KB pages, no game data."
+    },
+    {
+      "path": "*KOn-Houkago-Live-Recompiled-0.2.0-android.apk!/assets/toolchain/lib/arm64-v8a/libzstd.so.1",
+      "rule": "unexpected-binary",
+      "reason": "clang 21.1.8 / LLVM / lld / libc++ runtime libraries for on-device compilation; Apache-2.0 WITH LLVM-exception; license in the clang bundle (LICENSES/LLVM-Apache-2.0-LLVM-exception.txt). Audited AArch64, 16 KB pages, no game data."
+    },
+    {
+      "path": "*KOn-Houkago-Live-Recompiled-0.2.0-android.apk!/assets/toolchain/sysroot/usr/lib/aarch64-linux-android/29/crtbegin_so.o",
+      "rule": "unexpected-binary",
+      "reason": "Android NDK 28.2 aarch64 API 29 crtbegin_so/crtend_so linker objects; NDK sysroot, not game code."
+    },
+    {
+      "path": "*KOn-Houkago-Live-Recompiled-0.2.0-android.apk!/assets/toolchain/sysroot/usr/lib/aarch64-linux-android/29/crtend_so.o",
+      "rule": "unexpected-binary",
+      "reason": "Android NDK 28.2 aarch64 API 29 crtbegin_so/crtend_so linker objects; NDK sysroot, not game code."
+    },
+    {
+      "path": "*KOn-Houkago-Live-Recompiled-0.2.0-android.apk!/assets/toolchain/sysroot/usr/lib/aarch64-linux-android/29/libc.so",
+      "rule": "unexpected-binary",
+      "reason": "Android NDK 28.2 bionic linker stubs libc/libdl/libm for aarch64 API 29; link inputs only, not loaded on the device."
+    },
+    {
+      "path": "*KOn-Houkago-Live-Recompiled-0.2.0-android.apk!/assets/toolchain/sysroot/usr/lib/aarch64-linux-android/29/libdl.so",
+      "rule": "unexpected-binary",
+      "reason": "Android NDK 28.2 bionic linker stubs libc/libdl/libm for aarch64 API 29; link inputs only, not loaded on the device."
+    },
+    {
+      "path": "*KOn-Houkago-Live-Recompiled-0.2.0-android.apk!/assets/toolchain/sysroot/usr/lib/aarch64-linux-android/29/libm.so",
+      "rule": "unexpected-binary",
+      "reason": "Android NDK 28.2 bionic linker stubs libc/libdl/libm for aarch64 API 29; link inputs only, not loaded on the device."
+    },
+    {
+      "path": "*KOn-Houkago-Live-Recompiled-0.2.0-android.apk!/assets/toolchain/sysroot/usr/lib/aarch64-linux-android/libc++_static.a",
+      "rule": "unexpected-binary",
+      "reason": "Android NDK 28.2 libc++/libc++abi static libraries; Apache-2.0 WITH LLVM-exception; link inputs."
+    },
+    {
+      "path": "*KOn-Houkago-Live-Recompiled-0.2.0-android.apk!/assets/toolchain/sysroot/usr/lib/aarch64-linux-android/libc++abi.a",
+      "rule": "unexpected-binary",
+      "reason": "Android NDK 28.2 libc++/libc++abi static libraries; Apache-2.0 WITH LLVM-exception; link inputs."
+    },
+    {
+      "path": "*KOn-Houkago-Live-Recompiled-0.2.0-android.apk!/assets/toolchain/sysroot/usr/lib/clang/19/lib/linux/aarch64/libunwind.a",
+      "rule": "unexpected-binary",
+      "reason": "Android NDK 28.2 compiler-rt libunwind for aarch64; Apache-2.0 WITH LLVM-exception; link input."
+    },
+    {
+      "path": "*KOn-Houkago-Live-Recompiled-0.2.0-android.apk!/assets/toolchain/sysroot/usr/lib/clang/19/lib/linux/libclang_rt.builtins-aarch64-android.a",
+      "rule": "unexpected-binary",
+      "reason": "Android NDK 28.2 compiler-rt builtins for aarch64; Apache-2.0 WITH LLVM-exception; link input."
+    }
+  ]
+}

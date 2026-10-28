@@ -1,0 +1,89 @@
+KOn! Hokago Live!! Recompiled — Android 0.2.0
+THIRD-PARTY NOTICES
+
+Este archivo es el aviso para la APK que se genere con este código. Este
+repositorio contiene solo código fuente y no incluye la APK. La APK que se
+publique redistribuirá herramientas de compilación y bibliotecas de terceros;
+los textos íntegros de las licencias están en assets/licenses/ (copia de
+licenses/ del repositorio). Las obras con copyleft incluyen su fuente
+correspondiente en assets/toolchain/SOURCES/.
+
+1. LLVM / Clang / LLD / libc++ / libc++abi / libunwind / compiler-rt
+   Versión: LLVM 21.1.8 (clang, lld, libclang-cpp, libLLVM, libc++_shared,
+            Termux aarch64) y NDK 28.2.13676358 (libc++_static.a, libc++abi.a,
+            libunwind.a, libclang_rt.builtins-aarch64-android.a, cabeceras).
+   Licencia: Apache License 2.0 con LLVM Exception.
+   Textos: LLVM-LICENSE.txt, NDK-NOTICE.txt, NDK-NOTICE.toolchain.txt.
+
+2. Android NDK / bionic (libc, libdl, libm, liblog, libandroid, libaaudio)
+   Licencia: avisos del NDK (Apache-2.0 con LLVM Exception y BSD para bionic).
+   Textos: NDK-NOTICE.txt y NDK-NOTICE.toolchain.txt.
+
+3. GNU libiconv / libcharset
+   Versión: 1.19 (libiconv.so, libcharset.so).
+   Licencia: GNU Lesser General Public License v2.1 (LGPL-2.1).
+   Textos: LGPL-2.1.txt y LGPL-2.1-libiconv-COPYING.LIB.txt (el COPYING.LIB
+   del tarball; el COPYING de la raíz es GPLv3 y aplica solo a las utilidades
+   iconv, que este APK no redistribuye; se conserva como
+   GPL-3.0-libiconv-programs-COPYING.txt).
+   Fuente correspondiente: assets/toolchain/SOURCES/libiconv-1.19.tar.gz
+   (sha256 88dd96a8..., el mismo que usa el paquete Termux) y receta
+   assets/toolchain/SOURCES/termux-recipes/libiconv/
+   (--enable-extra-encodings, sin parches). Procedimiento de sustitución:
+   REPLACEMENT.md.
+
+4. libxml2
+   Versión: 2.15.4 (libxml2.so.16). Licencia: MIT. Texto: MIT-libxml2.txt.
+
+5. zlib
+   Versión: 1.3.2 (libz.so.1). Licencia: Zlib. Texto: Zlib.txt.
+
+6. zstd
+   Versión: 1.5.7 (libzstd.so.1). Licencia: BSD-3-Clause.
+   Texto: BSD-3-Clause-zstd.txt.
+
+7. XZ Utils / liblzma
+   Versión: 5.8.4 (liblzma.so.5). Licencia: 0BSD (licencia permisiva; no es
+   dominio público). Texto: 0BSD-liblzma.txt.
+
+8. libffi
+   Versión: 3.8.0 (libffi.so). Licencia: MIT. Texto: MIT-libffi.txt.
+
+9. pspdecrypt
+   lib/arm64-v8a/libkon_pspdecrypt.so, derivado de pspdecrypt
+   (commit c156627db7634d395c380c0a9589130f603307fc), recortado a la ruta
+   EBOOT/PRX.
+   Licencia: GNU General Public License v3.
+   Textos: GPL-3.0-pspdecrypt.txt y
+   GPL-3.0-pspdecrypt-PSP-LICENSE.txt (LICENSE.TXT del paquete de fuente).
+   Fuente completa y correspondiente del binario:
+   assets/toolchain/SOURCES/pspdecrypt_source-c156627-full.zip
+   (árbol upstream completo, modificaciones exactas, receta de build y
+   verificación byte a byte).
+   Atribución, cambios y origen: pspdecrypt-ATTRIBUTIONS.md,
+   pspdecrypt-UPSTREAM.md y pspdecrypt-VERIFICATION.md.
+
+10. PSPRecomp (psprecomp_core: 8 fuentes y 11 cabeceras en
+    assets/toolchain/psprecomp, y libkon_psprecomp.so)
+    Licencia: MIT. Texto: MIT-PSPRecomp.txt.
+
+11. Port KOn! Hokago Live!! Recompiled (libkon_runtime.so, libkon_probe.so)
+    Licencia: MIT. Texto: MIT-KOn-port.txt.
+
+12. FFmpeg (libavcodec.a, libavformat.a, libavutil.a, libswresample.a)
+    Versión 8.1, enlazadas estáticamente en libkon_runtime.so.
+    Licencia: GNU Lesser General Public License v2.1 o posterior.
+    Textos: FFmpeg-LICENSE-LGPL-2.1.txt, FFmpeg-LICENSE-LGPL-3.0.txt.
+    Fuente completa y recetas: assets/toolchain/SOURCES/ffmpeg-8.1.tar.xz y
+    assets/toolchain/SOURCES/ffmpeg-build-scripts/ (configure exacto,
+    config.h de cada ABI, recetas y comprobaciones).
+    Reenlace: FFmpeg-RELINK.md. Compilado con --disable-gpl, --disable-nonfree,
+    --disable-version3, --disable-asm y --disable-inline-asm.
+
+Las fuentes embebidas en assets/toolchain/SOURCES/ son solo código y recetas:
+no contienen ISO, EBOOT.BIN, CPK, corpus generado ni datos de partidas.
+
+Las versiones anteriores proceden de los paquetes Termux aarch64
+(clang 21.1.8-3, lld 21.1.8-3, libllvm 21.1.8-3, libc++ 30,
+libcompiler-rt 21.1.8-3, libiconv 1.19, libxml2 2.15.4-1, zlib 1.3.2,
+zstd 1.5.7-1, liblzma 5.8.4, libffi 3.8.0) y del NDK 28.2.13676358.

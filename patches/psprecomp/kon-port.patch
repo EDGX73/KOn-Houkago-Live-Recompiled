@@ -1,0 +1,516 @@
+diff --git a/include/psprecomp/allegrex_context.hpp b/include/psprecomp/allegrex_context.hpp
+index ea481f2641a35b41f46e1e97364461febb22dd23..44bf56bedcae48d50d05da4c87ef35132d9a83a5 100644
+--- a/include/psprecomp/allegrex_context.hpp
++++ b/include/psprecomp/allegrex_context.hpp
+@@ -21,6 +21,17 @@ struct alignas(16) AllegrexContext {
+     std::array<std::uint32_t, 32> gpr{};
+     std::uint32_t hi{};
+     std::uint32_t lo{};
++    // Signed 32-bit product added to the 64-bit HI:LO accumulator.
++    // Unsigned addition defines the required modulo-2^64 result even at overflow.
++    PSPRECOMP_CONTEXT_FORCEINLINE void execute_madd(std::uint32_t rs, std::uint32_t rt) noexcept {
++        const auto a = std::bit_cast<std::int32_t>(rs == 0u ? 0u : gpr[rs]);
++        const auto b = std::bit_cast<std::int32_t>(rt == 0u ? 0u : gpr[rt]);
++        const auto product = static_cast<std::int64_t>(a) * static_cast<std::int64_t>(b);
++        const auto accumulator = (static_cast<std::uint64_t>(hi) << 32u) | lo;
++        const auto result = accumulator + static_cast<std::uint64_t>(product);
++        hi = static_cast<std::uint32_t>(result >> 32u);
++        lo = static_cast<std::uint32_t>(result);
++    }
+     std::uint32_t pc{};
+     std::array<float, 32> fpr{};
+     std::uint32_t fcr31{};
+diff --git a/include/psprecomp/decoder.hpp b/include/psprecomp/decoder.hpp
+index 2a896d0abf63a8a2b0e86a7131d1f1e8d45506e1..d3ee63327e2e349597b2245dd97f953b66889fc5 100644
+--- a/include/psprecomp/decoder.hpp
++++ b/include/psprecomp/decoder.hpp
+@@ -13,7 +13,7 @@ enum class OpcodeKind {
+     Lw, Lwl, Lwr, Sw, Swl, Swr, Lh, Lhu, Sh, Lb, Lbu, Sb, Lwc1, Swc1, Cache,
+     Beq, Bne, Beql, Bnel, Blez, Bgtz, Blezl, Bgtzl, Bltz, Bgez, Bltzl, Bgezl, Bltzal, Bgezal, Bltzall, Bgezall, J, Jal, Jr, Jalr,
+     Mfhi, Mflo, Mthi, Mtlo,
+-    Mult, Multu, Div, Divu,
++    Mult, Multu, Div, Divu, Madd, Break,
+     Mfc1, Mtc1, Cfc1, Ctc1,
+     AddS, SubS, MulS, DivS, SqrtS, AbsS, MovS, NegS,
+     RoundWS, TruncWS, CeilWS, FloorWS, CvtWS, CvtSW, FpuCompare,
+diff --git a/include/psprecomp/guest_memory.hpp b/include/psprecomp/guest_memory.hpp
+index 62b6aca4dbc2c0c40238cf086efdbccaf7c8040f..ebdddb85b233daf114b471d7b41b269016cb0ef8 100644
+--- a/include/psprecomp/guest_memory.hpp
++++ b/include/psprecomp/guest_memory.hpp
+@@ -10,6 +10,13 @@
+ 
+ namespace psprecomp {
+ 
++// Optional diagnostic observer for PSPRECOMP_WATCH_WRITE hits (null by default).
++using WriteWatchObserver = void (*)(std::uint32_t address, std::size_t length, std::uint64_t old_value, std::uint64_t new_value);
++void set_write_watch_observer(WriteWatchObserver observer);
++// Diagnostic: replaces the watched set with these 4-byte words at run time.
++// Only effective when PSPRECOMP_WATCH_WRITE enabled watching at start.
++void set_write_watch_words(std::vector<std::uint32_t> addresses);
++
+ // Each generated AOT unit is one enormous function, and MSVC stops inlining
+ // into a caller that large -- measured: moving the fast paths into this header
+ // grew the linked image by only 2 KB, so the calls survived.  Roughly a third of
+@@ -27,6 +34,8 @@ public:
+     static constexpr std::uint32_t kVramMirrorCount = 4u;
+     static constexpr std::uint32_t kVramAddressSpan = kVramSize * kVramMirrorCount;
+     static constexpr std::uint32_t kPhysicalBase = 0x08000000u;
++    static constexpr std::uint32_t kScratchpadBase = 0x00010000u;
++    static constexpr std::uint32_t kScratchpadSize = 0x00004000u;
+ 
+     explicit GuestMemory(std::uint32_t size_bytes = 32u * 1024u * 1024u);
+ 
+@@ -246,7 +255,7 @@ public:
+     [[nodiscard]] const std::vector<std::uint8_t> &vram_bytes() const noexcept;
+ 
+ private:
+-    enum class Region { Vram, Ram };
++    enum class Region { Vram, Ram, Scratchpad };
+     struct ResolvedAddress {
+         Region region;
+         std::size_t offset;
+@@ -317,6 +326,7 @@ private:
+     std::uint32_t ram_limit16_{};
+     std::uint32_t ram_limit32_{};
+     bool write_watch_enabled_{};
++    std::vector<std::uint8_t> scratchpad_;
+ };
+ 
+ } // namespace psprecomp
+diff --git a/src/decoder.cpp b/src/decoder.cpp
+index 8a11aff4a30cccb250e28b3946cc7bc07f177c17..a5b01284bc29b690f5e69dc539119a3554d11d99 100644
+--- a/src/decoder.cpp
++++ b/src/decoder.cpp
+@@ -67,6 +67,7 @@ DecodedInstruction decode_allegrex(std::uint32_t word) {
+         case 0x0A: d.kind = OpcodeKind::Movz; d.mnemonic = "movz"; break;
+         case 0x0B: d.kind = OpcodeKind::Movn; d.mnemonic = "movn"; break;
+         case 0x0C: d.kind = OpcodeKind::Syscall; d.mnemonic = "syscall"; break;
++        case 0x0D: d.kind = OpcodeKind::Break; d.mnemonic = "break"; break;
+         case 0x0F: d.kind = OpcodeKind::Sync; d.mnemonic = "sync"; break;
+         case 0x10: d.kind = OpcodeKind::Mfhi; d.mnemonic = "mfhi"; break;
+         case 0x11: d.kind = OpcodeKind::Mthi; d.mnemonic = "mthi"; break;
+@@ -78,6 +79,7 @@ DecodedInstruction decode_allegrex(std::uint32_t word) {
+         case 0x19: d.kind = OpcodeKind::Multu; d.mnemonic = "multu"; break;
+         case 0x1A: d.kind = OpcodeKind::Div; d.mnemonic = "div"; break;
+         case 0x1B: d.kind = OpcodeKind::Divu; d.mnemonic = "divu"; break;
++        case 0x1C: d.kind = OpcodeKind::Madd; d.mnemonic = "madd"; break;
+         case 0x20: d.kind = OpcodeKind::Add; d.mnemonic = "add"; break;
+         case 0x21: d.kind = OpcodeKind::Addu; d.mnemonic = "addu"; break;
+         case 0x22: d.kind = OpcodeKind::Sub; d.mnemonic = "sub"; break;
+diff --git a/src/elf32.cpp b/src/elf32.cpp
+index 92585ef0a44f8045ba6717e155c52e9b7dd286de..60b5c9da44428a26a3a40aa97a7f67b535f8cd0c 100644
+--- a/src/elf32.cpp
++++ b/src/elf32.cpp
+@@ -326,9 +326,32 @@ std::optional<PspModuleInfo> Elf32Image::find_module_info(const GuestMemory &mem
+     const auto section_it = std::find_if(sections_.begin(), sections_.end(), [](const ElfSection &section) {
+         return section.name == ".rodata.sceModuleInfo" || section.name == ".sceModuleInfo";
+     });
+-    if (section_it == sections_.end() || section_it->size < sizeof(ModuleInfo32)) return std::nullopt;
+-    const std::uint32_t addr = section_runtime_address(*section_it, load_base);
+-    if (!memory.contains(addr, sizeof(ModuleInfo32))) return std::nullopt;
++    // PSP retail PRX files may omit every section name. In that case the
++    // first load header's p_paddr supplies the module-info FILE offset (its
++    // high bit is the kernel-module marker). Translate through PT_LOAD,
++    // rather than treating that file offset as a virtual address.
++    std::optional<std::uint32_t> module_addr;
++    if (section_it != sections_.end() && section_it->size >= sizeof(ModuleInfo32)) {
++        module_addr = section_runtime_address(*section_it, load_base);
++    } else if (is_psp_prx()) {
++        const auto first_load = std::find_if(segments_.begin(), segments_.end(), [](const ElfSegment &segment) {
++            return segment.type == kPtLoad;
++        });
++        if (first_load != segments_.end()) {
++            const std::uint32_t file_offset = first_load->paddr & 0x7FFFFFFFu;
++            for (std::size_t i = 0; i < segments_.size(); ++i) {
++                const auto &segment = segments_[i];
++                if (segment.type != kPtLoad || file_offset < segment.offset) continue;
++                const std::uint64_t delta = static_cast<std::uint64_t>(file_offset) - segment.offset;
++                if (delta + sizeof(ModuleInfo32) > segment.file_size) continue;
++                const std::uint64_t address = static_cast<std::uint64_t>(segment_runtime_address(i, load_base)) + delta;
++                if (address <= 0xFFFFFFFFu) module_addr = static_cast<std::uint32_t>(address);
++                break;
++            }
++        }
++    }
++    if (!module_addr || !memory.contains(*module_addr, sizeof(ModuleInfo32))) return std::nullopt;
++    const std::uint32_t addr = *module_addr;
+ 
+     char name[28]{};
+     for (std::size_t i = 0; i < sizeof(name); ++i) {
+diff --git a/src/guest_memory.cpp b/src/guest_memory.cpp
+index 092265b5d236e8f89e90e4eff80a602e427e5459..9cf244201e18ae995156cf17469e3f1496a95c5a 100644
+--- a/src/guest_memory.cpp
++++ b/src/guest_memory.cpp
+@@ -1,3 +1,4 @@
++#include <vector>
+ #include "psprecomp/guest_memory.hpp"
+ #include "psprecomp/common.hpp"
+ 
+@@ -10,6 +11,27 @@
+ 
+ namespace psprecomp {
+ 
++// Local port adaptation: original CPU accesses synchronize pending native GPU
++// ownership. Main-RAM AOT fast paths remain unchanged. The hook is thread-local
++// and bound to one memory instance; private replay memory never invokes it.
++using NativeVramAccessHook=bool(*)(void*,std::uint32_t,std::size_t) noexcept;
++namespace {
++thread_local const GuestMemory* native_vram_owner=nullptr;
++thread_local NativeVramAccessHook native_vram_hook=nullptr;
++thread_local void* native_vram_argument=nullptr;
++thread_local unsigned native_vram_suppressed=0;
++bool native_vram_access(const GuestMemory* memory,std::uint32_t address,std::size_t length) noexcept {
++ return !length || memory!=native_vram_owner || !native_vram_hook || native_vram_suppressed || native_vram_hook(native_vram_argument,address,length);
++}
++void require_native_vram_access(const GuestMemory* memory,std::uint32_t address,std::size_t length){
++ if(!native_vram_access(memory,address,length))throw Error("Native GPU ownership synchronization failed before original VRAM access");
++}
++}
++void set_native_vram_access_hook(const GuestMemory* memory,NativeVramAccessHook hook,void* argument) noexcept {
++ native_vram_owner=memory;native_vram_hook=hook;native_vram_argument=argument;
++}
++void suppress_native_vram_access(bool begin) noexcept {if(begin)++native_vram_suppressed;else if(native_vram_suppressed)--native_vram_suppressed;}
++
+ // Declared in runtime.hpp/runtime.cpp.  guest_memory.cpp intentionally avoids
+ // including runtime.hpp because Runtime owns a GuestMemory instance.
+ std::int32_t runtime_thread_uid() noexcept;
+@@ -21,6 +43,7 @@ struct WriteWatch {
+     bool enabled{};
+     std::uint32_t address{};
+     std::uint32_t size{4u};
++    std::vector<std::uint32_t> more; // further watched addresses ("a,b,c"), same size
+ };
+ 
+ const WriteWatch &write_watch() {
+@@ -30,7 +53,14 @@ const WriteWatch &write_watch() {
+         if (text == nullptr || *text == '\0') return result;
+         char *end = nullptr;
+         const unsigned long address = std::strtoul(text, &end, 0);
+-        if (end == text || *end != '\0' || address > 0xFFFFFFFFul) return result;
++        if (end == text || (*end != '\0' && *end != ',') || address > 0xFFFFFFFFul) return result;
++        while (*end == ',') {
++            const char *next = end + 1;
++            const unsigned long more = std::strtoul(next, &end, 0);
++            if (end == next || more > 0xFFFFFFFFul) return result;
++            result.more.push_back(static_cast<std::uint32_t>(more) & 0x1FFFFFFFu);
++        }
++        if (*end != '\0') return result;
+         result.enabled = true;
+         result.address = static_cast<std::uint32_t>(address);
+         if (const char *size_text = std::getenv("PSPRECOMP_WATCH_WRITE_SIZE")) {
+@@ -44,20 +74,36 @@ const WriteWatch &write_watch() {
+     return watch;
+ }
+ 
++std::atomic<const std::vector<std::uint32_t> *> runtime_watch_words{nullptr};
++
+ bool overlaps_watch(std::uint32_t address, std::size_t length) {
++    if (const auto *words = runtime_watch_words.load(std::memory_order_acquire)) {
++        const std::uint32_t first = (address & 0x1FFFFFFFu) & ~3u;
++        const std::uint32_t last = ((address & 0x1FFFFFFFu) + static_cast<std::uint32_t>(length) - 1u) & ~3u;
++        for (std::uint32_t word = first; word <= last; word += 4u)
++            if (std::binary_search(words->begin(), words->end(), word)) return true;
++        return false;
++    }
+     const WriteWatch &watch = write_watch();
+     if (!watch.enabled || length == 0u) return false;
+     const std::uint32_t canonical_address = address & 0x1FFFFFFFu;
+     const std::uint32_t canonical_watch = watch.address & 0x1FFFFFFFu;
+     const std::uint64_t first_end = static_cast<std::uint64_t>(canonical_address) + length;
+     const std::uint64_t watch_end = static_cast<std::uint64_t>(canonical_watch) + watch.size;
+-    return static_cast<std::uint64_t>(canonical_address) < watch_end &&
+-           static_cast<std::uint64_t>(canonical_watch) < first_end;
++    if (static_cast<std::uint64_t>(canonical_address) < watch_end &&
++        static_cast<std::uint64_t>(canonical_watch) < first_end) return true;
++    for (const std::uint32_t other : watch.more)
++        if (static_cast<std::uint64_t>(canonical_address) < static_cast<std::uint64_t>(other) + watch.size &&
++            static_cast<std::uint64_t>(other) < first_end) return true;
++    return false;
+ }
+ 
++WriteWatchObserver write_watch_observer = nullptr;
++
+ void log_write_watch(std::uint32_t address, std::size_t length, const char *operation,
+                      std::uint64_t old_value, std::uint64_t new_value) {
+     if (!overlaps_watch(address, length)) return;
++    if (write_watch_observer) { write_watch_observer(address, length, old_value, new_value); return; }
+     std::cerr << "[watch-write] uid=" << runtime_thread_uid()
+               << " name=" << runtime_thread_name()
+               << " pc=" << hex32(runtime_dispatch_pc())
+@@ -69,8 +115,16 @@ void log_write_watch(std::uint32_t address, std::size_t length, const char *oper
+ }
+ }
+ 
++void set_write_watch_observer(WriteWatchObserver observer) { write_watch_observer = observer; }
++void set_write_watch_words(std::vector<std::uint32_t> addresses) {
++    for (auto &address : addresses) address = (address & 0x1FFFFFFFu) & ~3u;
++    std::sort(addresses.begin(), addresses.end());
++    // Never freed: a store may still be reading the previous set (diagnostic only).
++    runtime_watch_words.store(new std::vector<std::uint32_t>(std::move(addresses)), std::memory_order_release);
++}
++
+ GuestMemory::GuestMemory(std::uint32_t size_bytes)
+-    : vram_(kVramSize, 0u), bytes_(size_bytes, 0u), write_watch_enabled_(std::getenv("PSPRECOMP_WATCH_WRITE") != nullptr) {
++    : vram_(kVramSize, 0u), bytes_(size_bytes, 0u), write_watch_enabled_(std::getenv("PSPRECOMP_WATCH_WRITE") != nullptr), scratchpad_(kScratchpadSize, 0u) {
+     if (size_bytes != 32u * 1024u * 1024u && size_bytes != 64u * 1024u * 1024u) {
+         throw Error("PSP RAM size must be 32 MiB or 64 MiB");
+     }
+@@ -96,6 +150,8 @@ std::size_t GuestMemory::vram_offset(std::uint32_t canonical_address) const noex
+ 
+ bool GuestMemory::contains(std::uint32_t address, std::size_t length) const noexcept {
+     const std::uint32_t c = canonical(address);
++    if (c >= kScratchpadBase && c < kScratchpadBase + kScratchpadSize &&
++        length <= kScratchpadSize - (c - kScratchpadBase)) return true;
+     const std::uint64_t end = static_cast<std::uint64_t>(c) + static_cast<std::uint64_t>(length);
+     if (is_vram_window(c) && end <= static_cast<std::uint64_t>(kVramPhysicalBase) + kVramAddressSpan)
+         return true;
+@@ -109,15 +165,18 @@ GuestMemory::ResolvedAddress GuestMemory::resolve(std::uint32_t address, std::si
+         throw Error("Guest memory access outside PSP RAM/EDRAM at " + hex32(address));
+     }
+     const std::uint32_t c = canonical(address);
+-    if (is_vram_window(c))
+-        return {Region::Vram, vram_offset(c)};
++    if (c >= kScratchpadBase && c < kScratchpadBase + kScratchpadSize)
++        return {Region::Scratchpad, static_cast<std::size_t>(c - kScratchpadBase)};
++    if (is_vram_window(c)){require_native_vram_access(this,address,length);return {Region::Vram, vram_offset(c)};}
+     return {Region::Ram, static_cast<std::size_t>(c - kPhysicalBase)};
+ }
+ 
+ const std::vector<std::uint8_t> &GuestMemory::region_bytes(Region region) const noexcept {
++    if (region == Region::Scratchpad) return scratchpad_;
+     return region == Region::Vram ? vram_ : bytes_;
+ }
+ std::vector<std::uint8_t> &GuestMemory::region_bytes(Region region) noexcept {
++    if (region == Region::Scratchpad) return scratchpad_;
+     return region == Region::Vram ? vram_ : bytes_;
+ }
+ 
+@@ -126,14 +185,18 @@ std::vector<std::uint8_t> &GuestMemory::region_bytes(Region region) noexcept {
+ // an out-of-range address, a region-crossing width, or an armed write watch.
+ std::uint8_t GuestMemory::aot_load8_slow(std::uint32_t address) const {
+     const std::uint32_t c = canonical(address);
++    if(is_vram_window(c))require_native_vram_access(this,address,1);
+     if (is_vram_window(c)) return vram_[vram_offset(c)];
+     if (c >= kPhysicalBase && c - kPhysicalBase < bytes_.size())
+         return bytes_[static_cast<std::size_t>(c - kPhysicalBase)];
++    // Scratchpad: direct, instead of the per-byte resolve of load8.
++    if (c >= kScratchpadBase && c - kScratchpadBase < scratchpad_.size()) return scratchpad_[c - kScratchpadBase];
+     return load8(address);
+ }
+ 
+ std::uint16_t GuestMemory::aot_load16_slow(std::uint32_t address) const {
+     const std::uint32_t c = canonical(address);
++    if(is_vram_window(c))require_native_vram_access(this,address,2);
+     if (is_vram_window(c)) {
+         const std::size_t offset = vram_offset(c);
+         if (offset + 2u <= vram_.size())
+@@ -144,12 +207,17 @@ std::uint16_t GuestMemory::aot_load16_slow(std::uint32_t address) const {
+         if (offset + 2u <= bytes_.size())
+             return static_cast<std::uint16_t>(bytes_[offset]) |
+                    static_cast<std::uint16_t>(static_cast<std::uint16_t>(bytes_[offset + 1u]) << 8u);
++    } else if (c >= kScratchpadBase && c - kScratchpadBase < scratchpad_.size() && c - kScratchpadBase + 2u <= scratchpad_.size()) {
++        const std::size_t offset = c - kScratchpadBase;
++        return static_cast<std::uint16_t>(scratchpad_[offset]) |
++               static_cast<std::uint16_t>(static_cast<std::uint16_t>(scratchpad_[offset + 1u]) << 8u);
+     }
+     return load16(address);
+ }
+ 
+ std::uint32_t GuestMemory::aot_load32_slow(std::uint32_t address) const {
+     const std::uint32_t c = canonical(address);
++    if(is_vram_window(c))require_native_vram_access(this,address,4);
+     const std::vector<std::uint8_t> *data = nullptr;
+     std::size_t offset = 0u;
+     if (is_vram_window(c)) {
+@@ -158,6 +226,9 @@ std::uint32_t GuestMemory::aot_load32_slow(std::uint32_t address) const {
+     } else if (c >= kPhysicalBase) {
+         data = &bytes_;
+         offset = static_cast<std::size_t>(c - kPhysicalBase);
++    } else if (c >= kScratchpadBase && c - kScratchpadBase < scratchpad_.size()) {
++        data = &scratchpad_;
++        offset = c - kScratchpadBase;
+     }
+     if (data != nullptr && offset + 4u <= data->size()) {
+         return static_cast<std::uint32_t>((*data)[offset]) |
+@@ -182,20 +253,24 @@ std::uint32_t GuestMemory::aot_load_word_right(std::uint32_t address, std::uint3
+ void GuestMemory::aot_store8_slow(std::uint32_t address, std::uint8_t value) {
+     if (write_watch_enabled_) { store8(address, value); return; }
+     const std::uint32_t c = canonical(address);
++    if(is_vram_window(c))require_native_vram_access(this,address,1);
+     if (is_vram_window(c)) { vram_[vram_offset(c)] = value; return; }
+     if (c >= kPhysicalBase && c - kPhysicalBase < bytes_.size()) {
+         bytes_[static_cast<std::size_t>(c - kPhysicalBase)] = value;
+         return;
+     }
++    if (c >= kScratchpadBase && c - kScratchpadBase < scratchpad_.size()) { scratchpad_[c - kScratchpadBase] = value; return; }
+     store8(address, value);
+ }
+ void GuestMemory::aot_store16_slow(std::uint32_t address, std::uint16_t value) {
+     if (write_watch_enabled_) { store16(address, value); return; }
+     const std::uint32_t c = canonical(address);
++    if(is_vram_window(c))require_native_vram_access(this,address,2);
+     std::vector<std::uint8_t> *data = nullptr;
+     std::size_t offset = 0u;
+     if (is_vram_window(c)) { data = &vram_; offset = vram_offset(c); }
+     else if (c >= kPhysicalBase) { data = &bytes_; offset = static_cast<std::size_t>(c - kPhysicalBase); }
++    else if (c >= kScratchpadBase && c - kScratchpadBase < scratchpad_.size()) { data = &scratchpad_; offset = c - kScratchpadBase; }
+     if (data != nullptr && offset + 2u <= data->size()) {
+         (*data)[offset] = static_cast<std::uint8_t>(value & 0xFFu);
+         (*data)[offset + 1u] = static_cast<std::uint8_t>((value >> 8u) & 0xFFu);
+@@ -206,10 +281,12 @@ void GuestMemory::aot_store16_slow(std::uint32_t address, std::uint16_t value) {
+ void GuestMemory::aot_store32_slow(std::uint32_t address, std::uint32_t value) {
+     if (write_watch_enabled_) { store32(address, value); return; }
+     const std::uint32_t c = canonical(address);
++    if(is_vram_window(c))require_native_vram_access(this,address,4);
+     std::vector<std::uint8_t> *data = nullptr;
+     std::size_t offset = 0u;
+     if (is_vram_window(c)) { data = &vram_; offset = vram_offset(c); }
+     else if (c >= kPhysicalBase) { data = &bytes_; offset = static_cast<std::size_t>(c - kPhysicalBase); }
++    else if (c >= kScratchpadBase && c - kScratchpadBase < scratchpad_.size()) { data = &scratchpad_; offset = c - kScratchpadBase; }
+     if (data != nullptr && offset + 4u <= data->size()) {
+         (*data)[offset] = static_cast<std::uint8_t>(value & 0xFFu);
+         (*data)[offset + 1u] = static_cast<std::uint8_t>((value >> 8u) & 0xFFu);
+@@ -293,12 +370,17 @@ std::uint8_t *GuestMemory::raw_pointer(std::uint32_t address, std::size_t length
+ const std::uint8_t *GuestMemory::raw_pointer(std::uint32_t address, std::size_t length) const noexcept {
+     const std::uint32_t c = canonical(address);
+     if (is_vram_window(c)) {
++        if(!native_vram_access(this,address,length))return nullptr;
+         const std::size_t offset = vram_offset(c);
+         // A run that would wrap past the end of the 2 MiB EDRAM image is not
+         // contiguous in host memory even though it is legal in guest space.
+         if (offset + length <= vram_.size()) return vram_.data() + offset;
+         return nullptr;
+     }
++    if (c >= kScratchpadBase && c < kScratchpadBase + kScratchpadSize) {
++        const auto offset = static_cast<std::size_t>(c - kScratchpadBase);
++        return length <= scratchpad_.size() - offset ? scratchpad_.data() + offset : nullptr;
++    }
+     if (c < kPhysicalBase) return nullptr;
+     const std::size_t offset = static_cast<std::size_t>(c - kPhysicalBase);
+     if (offset + length <= bytes_.size()) return bytes_.data() + offset;
+@@ -377,6 +459,8 @@ void GuestMemory::copy_in(std::uint32_t address, std::span<const std::uint8_t> s
+     if (!contains(address, source.size()))
+         throw Error("Guest memory access outside PSP RAM/EDRAM at " + hex32(address));
+     log_write_watch(address, source.size(), "copy_in", 0u, 0u);
++    // Synchronize the entire range before a bulk copy can bypass per-byte access.
++    if(is_vram_window(canonical(address)))require_native_vram_access(this,address,source.size());
+     std::size_t copied = 0u;
+     while (copied < source.size()) {
+         const std::uint32_t current = address + static_cast<std::uint32_t>(copied);
+@@ -391,6 +475,8 @@ void GuestMemory::copy_in(std::uint32_t address, std::span<const std::uint8_t> s
+ void GuestMemory::copy_out(std::uint32_t address, std::span<std::uint8_t> destination) const {
+     if (!contains(address, destination.size()))
+         throw Error("Guest memory access outside PSP RAM/EDRAM at " + hex32(address));
++    // Synchronize the entire range before a bulk copy can bypass per-byte access.
++    if(is_vram_window(canonical(address)))require_native_vram_access(this,address,destination.size());
+     std::size_t copied = 0u;
+     while (copied < destination.size()) {
+         const std::uint32_t current = address + static_cast<std::uint32_t>(copied);
+@@ -406,6 +492,8 @@ void GuestMemory::zero(std::uint32_t address, std::size_t length) {
+     if (!contains(address, length))
+         throw Error("Guest memory access outside PSP RAM/EDRAM at " + hex32(address));
+     log_write_watch(address, length, "zero", 0u, 0u);
++    // Synchronize the entire range before a bulk copy can bypass per-byte access.
++    if(is_vram_window(canonical(address)))require_native_vram_access(this,address,length);
+     std::size_t cleared = 0u;
+     while (cleared < length) {
+         const std::uint32_t current = address + static_cast<std::uint32_t>(cleared);
+diff --git a/src/program_analysis.cpp b/src/program_analysis.cpp
+index 6442e69c18a92fd35a18beb0f0c518db6805a84d..eced6962f910adfecf261aadc3df7f9e08c5a700 100644
+--- a/src/program_analysis.cpp
++++ b/src/program_analysis.cpp
+@@ -14,6 +14,20 @@ namespace {
+ 
+ std::vector<ExecutableRange> executable_ranges_for(const Elf32Image &elf, std::uint32_t load_base) {
+     std::vector<ExecutableRange> ranges;
++    // PSP RWX load segments can contain code, strings, textures and tables.
++    // Section flags retain code/data boundaries even when names are stripped.
++    // Use allocated, executable, file-backed sections when available.
++    for (const auto &section : elf.sections()) {
++        if (section.type != 1u || (section.flags & 6u) != 6u || section.size == 0u) continue;
++        const std::uint32_t start = elf.section_runtime_address(section, load_base);
++        const std::uint64_t end64 = static_cast<std::uint64_t>(start) + section.size;
++        if (end64 > std::numeric_limits<std::uint32_t>::max()) continue;
++        ranges.push_back({start, static_cast<std::uint32_t>(end64)});
++    }
++    if (!ranges.empty()) {
++        std::sort(ranges.begin(), ranges.end(), [](const auto &a, const auto &b) { return a.start < b.start; });
++        return ranges;
++    }
+     for (std::size_t i = 0; i < elf.segments().size(); ++i) {
+         const auto &segment = elf.segments()[i];
+         if (segment.type != 1u || (segment.flags & 1u) == 0u || segment.file_size == 0u) continue;
+diff --git a/tools/codegen_main.cpp b/tools/codegen_main.cpp
+index ed94229c842b90969f9a119574fa080ef858d363..024631a28b64256635108589137aa43924912f94 100644
+--- a/tools/codegen_main.cpp
++++ b/tools/codegen_main.cpp
+@@ -194,6 +194,13 @@ std::string emit_regular(const psprecomp::DecodedInstruction &d, std::uint32_t p
+     case psprecomp::OpcodeKind::Mflo: out << "    ctx.set_gpr(" << d.rd << ", ctx.lo);\n"; break;
+     case psprecomp::OpcodeKind::Mthi: out << "    ctx.hi = " << reg(d.rs) << ";\n"; break;
+     case psprecomp::OpcodeKind::Mtlo: out << "    ctx.lo = " << reg(d.rs) << ";\n"; break;
++    case psprecomp::OpcodeKind::Madd:
++        out << "    ctx.execute_madd(" << d.rs << "u, " << d.rt << "u);\n";
++        break;
++    case psprecomp::OpcodeKind::Break:
++        out << "    ctx.pc = " << psprecomp::hex32(pc) << "u; rt.stop(\"Allegrex BREAK code "
++            << ((d.word >> 6u) & 0xFFFFFu) << " at " << psprecomp::hex32(pc) << "\"); return;\n";
++        break;
+     case psprecomp::OpcodeKind::Mult:
+         out << "    { const std::int64_t product = static_cast<std::int64_t>(static_cast<std::int32_t>(" << reg(d.rs) << ")) * "
+             << "static_cast<std::int64_t>(static_cast<std::int32_t>(" << reg(d.rt) << ")); "
+@@ -990,6 +997,14 @@ std::string emit_function_source(const GeneratedFunctionInput &function,
+ 
+     for (const auto block_start : function.entry_labels) {
+         body << "L_" << psprecomp::hex32(block_start).substr(2) << ":\n";
++        // A same-unit JAL/JALR can arrive here without leaving native code.
++        // Import stubs must yield to the registered HLE wrapper, never execute
++        // their on-disc placeholder JR RA and silently skip the service.
++        if (function.import_stubs != nullptr && function.import_stubs->contains(block_start)) {
++            body << "    ctx.pc = " << psprecomp::hex32(block_start) << "u;\n"
++                 << "    return;\n";
++            continue;
++        }
+         std::uint32_t pc = block_start;
+         while (function.instructions.contains(pc)) {
+             if (pc != block_start && function.entry_labels.contains(pc)) {
+@@ -1056,7 +1071,9 @@ std::string emit_function_source(const GeneratedFunctionInput &function,
+                         if (target_is_import) {
+                             body << "    ctx.pc = " << psprecomp::hex32(target) << "u;\n"
+                                  << "    return;\n";
+-                            continue;
++                            // This guest block is complete. Continuing the emitter
++                            // loop keeps pc unchanged and emits this call forever.
++                            break;
+                         }
+                         // Otherwise run the callee inline and resume locally only
+                         // if it came back to our return address.
+@@ -1443,7 +1460,9 @@ int generate_auto(const std::filesystem::path &elf_path,
+     if (const auto module = elf.find_module_info(memory, load_base)) imports = elf.scan_imports(memory, *module);
+     std::set<std::uint32_t> import_stubs;
+     for (const auto &import : imports) import_stubs.insert(import.stub_address);
++    std::cerr << "Analyzing relocated executable..." << std::endl;
+     const auto program = psprecomp::analyze_program(elf, memory, load_base);
++    std::cerr << "Analysis complete: " << program.covered_labels.size() << " unique instructions" << std::endl;
+     if (program.executable_ranges.empty()) throw psprecomp::Error("ELF has no executable ranges");
+ 
+     std::filesystem::create_directories(output_dir);
+@@ -1542,7 +1561,10 @@ int generate_auto(const std::filesystem::path &elf_path,
+         // each grew past 2 GB, exhausting system memory during a normal build.
+         // This pipeline matches the last configuration observed booting on
+         // hardware.
+-        out << lower_constant_vfpu_accesses(
++        std::cerr << "Emitting unit " << unit.bucket << " (" << unit.instructions.size() << " instructions)..." << std::endl;
++        if (std::getenv("PSPRECOMP_PLAIN_AUTO") != nullptr) {
++            out << emit_function_source(generated_unit, memory, generated_unit.name);
++        } else out << lower_constant_vfpu_accesses(
+                 lower_aot_memory_accesses(
+                     lower_constant_fpr_accesses(
+                         lower_constant_gpr_writes(emit_function_source(generated_unit, memory, generated_unit.name)))));
+@@ -1558,6 +1580,7 @@ int generate_auto(const std::filesystem::path &elf_path,
+         }
+         out << "}\n} // namespace psprecomp\n";
+         rewritten_units += write_text_if_changed(path, out.str()) ? 1u : 0u;
++        std::cerr << "Unit " << unit.bucket << " complete" << std::endl;
+     }
+ 
+     const auto registry_path = output_dir / "generated_registry.cpp";

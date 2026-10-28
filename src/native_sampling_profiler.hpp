@@ -1,4 +1,22 @@
 #pragma once
+#ifdef __ANDROID__
+// The diagnostic sampling profiler uses Windows' thread suspension and
+// DbgHelp. Android profiling is done with simple_perfetto/perfetto instead;
+// keep the interface as a no-op so the runtime compiles.
+#include <filesystem>
+#include <functional>
+namespace kon {
+class NativeSamplingProfiler {
+public:
+    using Window=std::function<bool()>;
+    NativeSamplingProfiler(unsigned long,Window){}
+    ~NativeSamplingProfiler()=default;
+    void stop(){}
+    void write(const std::filesystem::path&){}
+};
+}
+#else
+
 #ifndef NOMINMAX
 #define NOMINMAX
 #endif
@@ -95,3 +113,4 @@ private:
     }
 };
 }
+#endif // __ANDROID__

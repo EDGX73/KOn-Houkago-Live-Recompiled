@@ -7,6 +7,7 @@
 #include <mutex>
 #include <string>
 #include <vector>
+#ifdef _WIN32
 #ifndef NOMINMAX
 #define NOMINMAX
 #endif
@@ -17,11 +18,22 @@
 #include <xinput.h>
 #include <hidsdi.h>
 #include <hidpi.h>
+#endif
 #include <algorithm>
 #include <cstdlib>
 #include <span>
+#ifdef _WIN32
 #pragma comment(lib,"hid.lib")
+#endif
 namespace kon {
+namespace gamepad_detail {
+inline bool active(const PadState& s){
+    const auto off=[](std::uint8_t v){return v<64 || v>192;};
+    return s.buttons || off(s.x) || off(s.y);
+}
+inline std::string narrow(const std::wstring& w){std::string s;s.reserve(w.size());for(const auto c:w)s.push_back(c<128?static_cast<char>(c):'?');return s;}
+}
+#ifdef _WIN32
 // Every game controller Windows exposes: XInput devices (Xbox and compatible)
 // polled directly, everything else (PlayStation, Nintendo, generic
 // DirectInput/HID pads) through Raw Input on the game window. Devices may be
@@ -55,13 +67,6 @@ private:
     std::atomic<bool> xinput_connected_{false};PadState last_xinput_;
 };
 
-namespace gamepad_detail {
-inline bool active(const PadState& s){
-    const auto off=[](std::uint8_t v){return v<64 || v>192;};
-    return s.buttons || off(s.x) || off(s.y);
-}
-inline std::string narrow(const std::wstring& w){std::string s;s.reserve(w.size());for(const auto c:w)s.push_back(c<128?static_cast<char>(c):'?');return s;}
-}
 inline void GamepadHub::register_window(HWND window){
     // Generic desktop page: joystick (4) and gamepad (5); also notified of arrivals/removals.
     RAWINPUTDEVICE devices[2]{{1,4,RIDEV_INPUTSINK|RIDEV_DEVNOTIFY,window},{1,5,RIDEV_INPUTSINK|RIDEV_DEVNOTIFY,window}};
@@ -160,4 +165,40 @@ inline PadState GamepadHub::read(){
     if(any){note_activity(InputStyle::Xbox,last_xinput_,xinput);last_xinput_=xinput;combined.buttons|=xinput.buttons;if(xinput.x!=128)combined.x=xinput.x;if(xinput.y!=128)combined.y=xinput.y;}
     combined.valid=true;return combined;
 }
+#else
+// Hosts that deliver controller events (Android, Linux): the platform layer
+// submits each device's latest state; the union and the last-used style follow
+// the same rules as the Windows hub above.
+class GamepadHub {
+public:
+    static GamepadHub& instance(){static GamepadHub hub;return hub;}
+    struct DeviceInfo {std::string name;std::uint16_t vendor=0,product=0;InputStyle style=InputStyle::Generic;};
+    void submit(std::uint64_t device,const DeviceInfo& info,PadState state){
+        std::lock_guard lock(mutex_);auto& d=devices_[device];d.info=info;
+        state.buttons=ButtonMap::instance().route(info.style,state.buttons); // config/controls.ini
+        // A short touch or controller tap can fall between two game reads. Keep
+        // the rising edge until the next read so the game always sees it.
+        pending_presses_|=state.buttons&~d.state.buttons;
+        note_activity(info.style,d.state,state);d.state=state;
+    }
+    void remove(std::uint64_t device){std::lock_guard lock(mutex_);devices_.erase(device);}
+    PadState read(){
+        PadState combined;std::lock_guard lock(mutex_);
+        for(const auto& [id,d]:devices_)if(d.state.valid){combined.buttons|=d.state.buttons;if(d.state.x<64 || d.state.x>192)combined.x=d.state.x;if(d.state.y<64 || d.state.y>192)combined.y=d.state.y;}
+        combined.buttons|=pending_presses_;pending_presses_=0;
+        combined.valid=true;return combined;
+    }
+    InputStyle style()const{return style_.load(std::memory_order_relaxed);}
+    void note_keyboard(){style_.store(InputStyle::Keyboard,std::memory_order_relaxed);}
+    std::vector<DeviceInfo> devices(){std::lock_guard lock(mutex_);std::vector<DeviceInfo> out;for(const auto& [id,d]:devices_)out.push_back(d.info);return out;}
+    bool xinput_connected()const{return false;}
+private:
+    struct Device {DeviceInfo info;PadState state;};
+    GamepadHub()=default;
+    void note_activity(InputStyle style,const PadState& before,const PadState& after){
+        if(gamepad_detail::active(after) && (after.buttons!=before.buttons || !gamepad_detail::active(before)))style_.store(style,std::memory_order_relaxed);
+    }
+    std::mutex mutex_;std::map<std::uint64_t,Device> devices_;std::atomic<InputStyle> style_{InputStyle::Keyboard};std::uint32_t pending_presses_=0;
+};
+#endif
 }

@@ -2,13 +2,17 @@
 //  - First time: asks for the player's ISO and installs it (native_install.hpp).
 //  - Builds the game from it on this PC when needed (native_build.hpp): the
 //    first time, and after an update of the package.
-//  - Offers new releases from the official GitHub (native_update.hpp).
+//  - Offers new releases from the official GitHub (native_update.hpp) with a
+//    visible Win32 dialog (update_dialog.hpp); --check-updates opens it alone.
+//    Updates are installed only from the launcher, never from the game: the
+//    F9 update menu inside the game is a later phase.
 //  - Starts the game (bin/), with everything kept in this folder.
 // A console window appears only while installing or building.
 #include "kon_version.h"
 #include "native_install.hpp"
 #include "native_build.hpp"
 #include "native_update.hpp"
+#include "update_dialog.hpp"
 #include <cstdio>
 #include <future>
 #include <iostream>
@@ -31,8 +35,33 @@ std::string setting(const std::filesystem::path& file,const std::string& key){
     while(!value.empty() && (value.back()=='\r' || value.back()==' '))value.pop_back();
     return value;
 }
-// Offers a newer release from GitHub; true when it was installed and the new
-// launcher started instead. Never delays the game more than 4 s.
+void remember_skipped_version(const std::filesystem::path& root,const std::string& tag){
+    const auto skipped=root/"config"/"actualizacion_omitida.txt";
+    std::filesystem::create_directories(skipped.parent_path());
+    std::ofstream(skipped)<<"version="<<tag<<"\n";
+}
+void restart_launcher(const std::filesystem::path& root,int argc,wchar_t** argv,bool drop_check_updates){
+    wchar_t module[MAX_PATH]{};GetModuleFileNameW(nullptr,module,MAX_PATH);
+    std::wstring command=kon::quoted(module);
+    for(int i=1;i<argc;++i){
+        if(drop_check_updates && std::wstring(argv[i])==L"--check-updates")continue;
+        command+=L" "+kon::quoted(argv[i]);
+    }
+    STARTUPINFOW si{};si.cb=sizeof si;PROCESS_INFORMATION pi{};
+    if(!CreateProcessW(nullptr,command.data(),nullptr,nullptr,FALSE,0,nullptr,root.wstring().c_str(),&si,&pi))
+        throw std::runtime_error("Se instaló la actualización, pero no se pudo reiniciar el lanzador. Ábrelo de nuevo desde la carpeta del juego");
+    CloseHandle(pi.hThread);CloseHandle(pi.hProcess);
+}
+// Offers a newer release from GitHub with the visible update dialog; true when
+// it was installed and the new launcher started instead. The automatic check
+// never delays the game more than 4 s: only when a newer release is already
+// known does the dialog open. The manual --check-updates dialog always opens
+// and searches in the background.
+//
+// Updates are installed only when the launcher is opened, never from the game.
+// The launcher does not look for or close a running game: the dialog asks the
+// player to close it. An F9 update menu inside the game belongs to a later
+// phase. userdata/ and config/ are never touched here.
 bool offer_update(const std::filesystem::path& root,int argc,wchar_t** argv){
     if(setting(root/"config"/"settings.ini","updates")=="0")return false;
     auto check=std::async(std::launch::async,[]{try{return kon::latest_release();}catch(const std::exception&){return std::optional<kon::ReleaseInfo>{};}});
@@ -42,37 +71,48 @@ bool offer_update(const std::filesystem::path& root,int argc,wchar_t** argv){
     if(!latest || !current || !(*current<*latest))return false;
     const auto skipped=root/"config"/"actualizacion_omitida.txt";
     if(setting(skipped,"version")==release->tag)return false;
-    const std::wstring text=L"Hay una versión nueva: "+kon::widen(release->tag)+L" (tienes la " KON_VERSION_WIDE L").\n\n¿Actualizar ahora? Tus partidas y ajustes se conservan.\n\n(Si dices que no, no volverá a preguntar hasta la siguiente versión.)";
-    if(!_wgetenv(L"KON_UPDATE_YES") && MessageBoxW(nullptr,text.c_str(),L"K-On! Houkago Live!! Recompiled",MB_YESNO|MB_ICONINFORMATION)!=IDYES){  // KON_UPDATE_YES: tests
-        std::filesystem::create_directories(skipped.parent_path());std::ofstream(skipped)<<"version="<<release->tag<<"\n";return false;
+    const bool auto_install=_wgetenv(L"KON_UPDATE_YES")!=nullptr;  // tests
+    const auto outcome=kon::run_update_dialog(root,release,auto_install);
+    if(!outcome)return false;
+    if(outcome->action==kon::UpdateDialogResult::Action::Skipped){remember_skipped_version(root,outcome->tag);return false;}
+    if(outcome->action==kon::UpdateDialogResult::Action::Installed){
+        // The new launcher rebuilds the game and starts it.
+        restart_launcher(root,argc,argv,false);
+        return true;
     }
-    open_console();
-    kon::install_update(root,*release);
-    // The new launcher rebuilds the game and starts it.
-    wchar_t module[MAX_PATH]{};GetModuleFileNameW(nullptr,module,MAX_PATH);
-    std::wstring command=kon::quoted(module);
-    for(int i=1;i<argc;++i)command+=L" "+kon::quoted(argv[i]);
-    STARTUPINFOW si{};si.cb=sizeof si;PROCESS_INFORMATION pi{};
-    if(!CreateProcessW(nullptr,command.data(),nullptr,nullptr,FALSE,0,nullptr,root.wstring().c_str(),&si,&pi))throw std::runtime_error("Actualizado: vuelve a abrir el juego");
-    CloseHandle(pi.hThread);CloseHandle(pi.hProcess);
-    return true;
+    return false;
+}
+bool check_updates_manually(const std::filesystem::path& root,int argc,wchar_t** argv){
+    const bool auto_install=_wgetenv(L"KON_UPDATE_YES")!=nullptr;  // tests
+    const auto outcome=kon::run_update_dialog(root,std::nullopt,auto_install);
+    if(!outcome)return false;
+    if(outcome->action==kon::UpdateDialogResult::Action::Skipped)remember_skipped_version(root,outcome->tag);
+    if(outcome->action==kon::UpdateDialogResult::Action::Installed){
+        // --check-updates is dropped: the new launcher opens normally (and
+        // rebuilds the game if the package changed).
+        restart_launcher(root,argc,argv,true);
+        return true;
+    }
+    return false;
 }
 }
 
 int wmain(int argc,wchar_t** argv){
     wchar_t module[MAX_PATH]{};GetModuleFileNameW(nullptr,module,MAX_PATH);
     const auto root=std::filesystem::path(module).parent_path();
-    std::vector<std::filesystem::path> isos;std::vector<std::wstring> game_args;bool rebuild=false,launch=true;
+    std::vector<std::filesystem::path> isos;std::vector<std::wstring> game_args;bool rebuild=false,launch=true,check_updates=false;
     for(int i=1;i<argc;++i){
         const std::wstring a=argv[i];
         if(a==L"--rebuild")rebuild=true;
         else if(a==L"--no-launch")launch=false;  // install and build only (tests)
+        else if(a==L"--check-updates")check_updates=true;  // open the update dialog only
         else if(a==L"ja" || a==L"en")game_args.push_back(L"--language "+a);
         else if(std::filesystem::is_regular_file(a))isos.emplace_back(a);  // an ISO dropped on the program
     }
     try{
         {auto old=std::filesystem::path(module);old+=L".old";std::error_code ignore;std::filesystem::remove(old,ignore);}  // left by an update
         kon::GameBuild build{root};
+        if(check_updates){check_updates_manually(root,argc,argv);return 0;}
         if(launch && offer_update(root,argc,argv))return 0;
         if(!std::filesystem::is_regular_file(build.elf()) || !isos.empty()){
             open_console();

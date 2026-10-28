@@ -1,5 +1,9 @@
 # Plan del port de K-On! Hōkago Live!!
 
+> Nota (2026-10-28): este documento describe la fase inicial centrada en
+> Windows. El proyecto incluye además una beta Android arm64; consulta el
+> [README](../README.md) y [ANDROID.md](ANDROID.md).
+
 Seguimiento de fases: [roadmap completo con tareas tachadas](ROADMAP.md).
 
 El objetivo es una versión nativa para Windows que conserve el juego original,

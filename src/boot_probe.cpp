@@ -33,7 +33,12 @@
 #include "native_activity.hpp"
 #include "native_discord.hpp"
 #include "native_online.hpp"
+#ifdef _WIN32
 #include "native_install.hpp"
+#endif
+#ifdef __ANDROID__
+#include "../android/game_module_abi.hpp"
+#endif
 #include <array>
 #include <unordered_map>
 #include <bit>
@@ -54,12 +59,21 @@
 #include "native_mods.hpp"
 #include "native_image_wic.hpp"
 #include "native_adhoc.hpp"
+#ifdef _WIN32
 #include <shellapi.h>
 #pragma comment(lib,"shell32.lib")
+#endif
 #include <map>
 #include <stdexcept>
 #include <string>
 #include <vector>
+
+#ifdef _WIN32
+inline unsigned long kon_current_thread_id(){return GetCurrentThreadId();}
+#else
+#include <unistd.h>
+inline unsigned long kon_current_thread_id(){return static_cast<unsigned long>(gettid());}
+#endif
 
 // This pinned runtime defines the import-boundary hook in runtime.cpp; its
 // public header currently declares the other boundary hooks but omits this one.
@@ -144,6 +158,14 @@ public:
     bool stop_after_visible_frame=false;
     bool trace_render=false;
     std::uint64_t runtime_limit_us=0;
+    // --stop-on-result[=ms]: stop the runtime this long after the results screen
+    // is loaded (native_activity.hpp on_results). --hold-on-stop keeps it visible.
+    std::uint64_t stop_on_result_us=0,result_deadline_us=0;
+    void result_screen_loaded(){
+        if(!stop_on_result_us || result_deadline_us)return;
+        result_deadline_us=clock_.system_microseconds()+stop_on_result_us;
+        std::cout<<"native_result_screen=1 activity=\""<<activity_.presence().details<<"\" stop_in_ms="<<stop_on_result_us/1000u<<'\n'<<std::flush;
+    }
     kon::ControlReplay control_replay;
     kon::ControlReplay audio_anchored_replay;
     unsigned input_anchor_channel=3;
@@ -247,8 +269,35 @@ public:
     static constexpr std::uint16_t kOnlinePort=41700;
     std::mutex online_mutex_;std::unique_ptr<kon::UpnpMapping> upnp_;std::thread upnp_thread_;bool upnp_busy_=false,online_hosting_=false;
     std::string online_joined_,online_note_;
+#ifdef _WIN32
     static std::wstring wide(const std::string& s){std::wstring w(s.size(),L'\0');w.resize(std::size_t(MultiByteToWideChar(CP_UTF8,0,s.data(),int(s.size()),w.data(),int(w.size()))));return w;}
     static std::string narrow(const std::wstring& w){std::string s(w.size()*3,'\0');s.resize(std::size_t(WideCharToMultiByte(CP_UTF8,0,w.data(),int(w.size()),s.data(),int(s.size()),nullptr,nullptr)));return s;}
+#else
+    static std::wstring wide(const std::string& s){
+        std::wstring out;out.reserve(s.size());
+        for(std::size_t i=0;i<s.size();){
+            const auto c=static_cast<unsigned char>(s[i++]);std::uint32_t v=c;
+            if(c>=0x80){
+                unsigned extra=c<0xE0?1:c<0xF0?2:3;v=c&(0x3F>>extra);
+                if(i+extra>s.size()){out+=L'?';break;}
+                for(unsigned n=0;n<extra;++n)v=(v<<6)|(static_cast<unsigned char>(s[i++])&0x3F);
+            }
+            out+=static_cast<wchar_t>(v);
+        }
+        return out;
+    }
+    static std::string narrow(const std::wstring& w){
+        std::string out;out.reserve(w.size());
+        for(const wchar_t c:w){
+            auto v=static_cast<std::uint32_t>(c);
+            if(v<0x80)out+=char(v);
+            else if(v<0x800){out+=char(0xC0|(v>>6));out+=char(0x80|(v&0x3F));}
+            else if(v<0x10000){out+=char(0xE0|(v>>12));out+=char(0x80|((v>>6)&0x3F));out+=char(0x80|(v&0x3F));}
+            else{out+=char(0xF0|(v>>18));out+=char(0x80|((v>>12)&0x3F));out+=char(0x80|((v>>6)&0x3F));out+=char(0x80|(v&0x3F));}
+        }
+        return out;
+    }
+#endif
     struct RoomCodes {std::string internet,ipv6,lan;std::vector<std::pair<std::string,std::string>> vpn;};
     RoomCodes room_codes(){
         RoomCodes codes;const auto local=kon::local_addresses();
@@ -262,8 +311,12 @@ public:
     std::wstring online_action(kon::NativeWindow::OnlineAction action,const std::wstring& text){
         using A=kon::NativeWindow::OnlineAction;auto& net=adhoc();
         if(action==A::Host){
-            if(!net.online_host(kOnlinePort))return {};
-            std::lock_guard lock(online_mutex_);online_hosting_=true;online_joined_.clear();
+            if(!net.online_host(kOnlinePort)){
+                std::lock_guard lock(online_mutex_);
+                online_note_="No se pudo crear la sala: el puerto TCP 41700 puede estar ocupado por otra instancia del juego, o no hay red. CiÃ©rrala o comprueba la conexiÃ³n y vuelve a intentarlo.";
+                return {};
+            }
+            std::lock_guard lock(online_mutex_);online_hosting_=true;online_joined_.clear();online_note_.clear();
             if(!upnp_busy_ && !(upnp_ && upnp_->mapped) && !std::getenv("KON_ONLINE_NO_UPNP")){
                 upnp_busy_=true;if(upnp_thread_.joinable())upnp_thread_.join();
                 upnp_thread_=std::thread([this]{auto m=std::make_unique<kon::UpnpMapping>(kon::UpnpMapping::open(kOnlinePort));
@@ -272,38 +325,45 @@ public:
             calls.push_back("OnlineHost port="+std::to_string(kOnlinePort));return {};
         }
         if(action==A::Join){
+            if(narrow(text).empty()){std::lock_guard lock(online_mutex_);online_note_="Escribe el cÃ³digo de la sala de tu amigo.";return {};}
             const auto room=kon::parse_room_code(narrow(text));
-            if(!room){std::lock_guard lock(online_mutex_);online_note_="Ese código no es válido: debe tener 10 o 29 letras y números (o dirección:puerto).";return {};}
+            if(!room){std::lock_guard lock(online_mutex_);online_note_="Ese cÃ³digo no es vÃ¡lido: debe tener 10 o 29 letras y nÃºmeros (o direcciÃ³n:puerto).";return {};}
             {std::lock_guard lock(online_mutex_);online_note_.clear();}
             net.online_join(room->host,room->port);std::lock_guard lock(online_mutex_);online_hosting_=false;online_joined_=narrow(text);
             calls.push_back("OnlineJoin host="+room->host+" port="+std::to_string(room->port));return {};
         }
-        if(action==A::Leave){net.online_leave();std::lock_guard lock(online_mutex_);online_hosting_=false;online_joined_.clear();if(upnp_)upnp_->close();calls.push_back("OnlineLeave");return {};}
+        if(action==A::Leave){net.online_leave();std::lock_guard lock(online_mutex_);online_hosting_=false;online_joined_.clear();online_note_.clear();if(upnp_)upnp_->close();calls.push_back("OnlineLeave");return {};}
+        if(action==A::Code){
+            {std::lock_guard lock(online_mutex_);
+             if(!online_hosting_){online_note_="Crea una sala antes de copiar el cÃ³digo.";return {};}
+             online_note_.clear();}
+            const auto codes=room_codes();
+            return wide(!codes.internet.empty()?codes.internet:!codes.vpn.empty()?codes.vpn.front().second:!codes.ipv6.empty()?codes.ipv6:codes.lan);
+        }
         const auto codes=room_codes();
-        if(action==A::Code)return wide(!codes.internet.empty()?codes.internet:!codes.vpn.empty()?codes.vpn.front().second:!codes.ipv6.empty()?codes.ipv6:codes.lan);
         // Status text.
         const auto state=net.online();std::string out;bool hosting,busy;std::string joined;kon::UpnpMapping upnp_view;
         {std::lock_guard lock(online_mutex_);hosting=online_hosting_;busy=upnp_busy_;joined=online_joined_;if(upnp_){upnp_view.mapped=upnp_->mapped;upnp_view.external_ip=upnp_->external_ip;upnp_view.error=upnp_->error;}}
         if(hosting && state.hosting){
             out="Sala creada (puerto TCP "+std::to_string(kOnlinePort)+"). Jugadores: "+std::to_string(state.players)+".\r\n";
             if(busy)out+="Pidiendo al router que abra el puerto (UPnP)...\r\n";
-            if(!codes.internet.empty())out+="Código para tu amigo (Internet): "+codes.internet+"\r\n";
+            if(!codes.internet.empty())out+="CÃ³digo para tu amigo (Internet): "+codes.internet+"\r\n";
             else if(!busy){
                 const bool cgnat=upnp_view.mapped && kon::private_ipv4(upnp_view.external_ip);
-                if(cgnat)out+="Tu conexión no tiene IP pública propia (CG-NAT): desde fuera no se puede entrar directamente a tu sala.\r\n";
-                else{out+="El router no abrió el puerto";if(!upnp_view.error.empty())out+=" ("+upnp_view.error+")";
+                if(cgnat)out+="Tu conexiÃ³n no tiene IP pÃºblica propia (CG-NAT): desde fuera no se puede entrar directamente a tu sala.\r\n";
+                else{out+="El router no abriÃ³ el puerto";if(!upnp_view.error.empty())out+=" ("+upnp_view.error+")";
                     out+=". Se puede abrir a mano el puerto TCP "+std::to_string(kOnlinePort)+" en el router.\r\n";}
             }
-            for(const auto& [name,code]:codes.vpn)out+="Código por "+name+" (tu amigo conectado a tu red de "+name+"): "+code+"\r\n";
-            if(!codes.ipv6.empty())out+="Código IPv6: "+codes.ipv6+"\r\n";
-            if(!codes.lan.empty())out+="Código solo para tu misma casa (wifi o cable): "+codes.lan+"\r\n";
-            if(codes.internet.empty() && codes.vpn.empty() && !busy)out+="Para jugar con alguien de fuera: que cree la sala tu amigo (si su conexión no tiene CG-NAT), o usad los dos Radmin VPN (gratis) y volved a crear la sala.\r\n";
-            out+="«Copiar código» copia el primero. Windows puede pedir permiso al Cortafuegos: acéptalo.";
+            for(const auto& [name,code]:codes.vpn)out+="CÃ³digo por "+name+" (tu amigo conectado a tu red de "+name+"): "+code+"\r\n";
+            if(!codes.ipv6.empty())out+="CÃ³digo IPv6: "+codes.ipv6+"\r\n";
+            if(!codes.lan.empty())out+="CÃ³digo solo para tu misma casa (wifi o cable): "+codes.lan+"\r\n";
+            if(codes.internet.empty() && codes.vpn.empty() && !busy)out+="Para jugar con alguien de fuera: que cree la sala tu amigo (si su conexiÃ³n no tiene CG-NAT), o usad los dos Radmin VPN (gratis) y volved a crear la sala.\r\n";
+            out+="Â«Copiar cÃ³digoÂ» copia el primero. Windows puede pedir permiso al Cortafuegos: acÃ©ptalo.";
         }else if(!joined.empty()){
-            if(state.linked)out="Conectado a la sala. Jugadores: "+std::to_string(state.players)+".\r\nEntra en つうしん! (Local) y únete a la banda de tu amigo.";
-            else out="Conectando a la sala "+joined+"...\r\n"+(state.error.empty()?std::string{}:"Último intento: "+state.error+".\r\nComprueba el código y que tu amigo tenga la sala abierta.");
+            if(state.linked)out="Conectado a la sala. Jugadores: "+std::to_string(state.players)+".\r\nEntra en ã¤ã†ã—ã‚“! (Local) y Ãºnete a la banda de tu amigo.";
+            else out="Conectando a la sala "+joined+"...\r\n"+(state.error.empty()?std::string{}:"Ãšltimo intento: "+state.error+".\r\nComprueba el cÃ³digo y que tu amigo tenga la sala abierta.");
         }else{
-            out="No estás en ninguna sala.";
+            out="No estÃ¡s en ninguna sala.";
             std::lock_guard lock(online_mutex_);if(!online_note_.empty())out+="\r\n"+online_note_;
         }
         return wide(out);
@@ -549,7 +609,7 @@ public:
     }
     ~BootstrapServices(){psprecomp::set_native_vram_access_hook(nullptr,nullptr,nullptr);if(upnp_thread_.joinable())upnp_thread_.join();}
     // Native id of the asynchronous render thread (diagnostic profiling).
-    unsigned long render_thread_id(){if(!renderer_.async())return GetCurrentThreadId();unsigned long id=0;renderer_.enqueue([&id]{id=GetCurrentThreadId();});renderer_.drain();return id;}
+    unsigned long render_thread_id(){if(!renderer_.async())return kon_current_thread_id();unsigned long id=0;renderer_.enqueue([&id]{id=kon_current_thread_id();});renderer_.drain();return id;}
     void enable_resident_gpu_ownership(){
         renderer_.set_draw_queue(std::getenv("KON_NO_DRAW_QUEUE")==nullptr); // diagnostic A/B
         // Asynchronous rendering: GE work and frame presentation run on the
@@ -1564,6 +1624,27 @@ public:
             const auto now=clock_.system_microseconds(),next=controls_.next_sample();
             block_wait(c,WaitKind::Controller,0,count,0,destination,0,static_cast<std::uint32_t>(next>now?next-now:1u));
         });
+        // Several game screens (including the rhythm stage) poll the pad with
+        // Peek instead of Read; without this HLE their input is ignored.
+        rt.nids().add("sceCtrl",0x3A622550u,"sceCtrlPeekBufferPositive");
+        rt.register_hle("sceCtrl",0x3A622550u,[this](auto&,auto& c){
+            const auto destination=c.gpr[4],count=c.gpr[5];
+            if(count>=64u){c.set_gpr(2,0x80000104u);return;}
+            if(!count || !rt.memory().contains(destination,static_cast<std::size_t>(count)*16u)){c.set_gpr(2,0x80000103u);return;}
+            // Peek reports the live pad without consuming the buffer the game
+            // may read later. Returning an empty ring here left the rhythm
+            // stage and several menus deaf to input.
+            const auto now=clock_.system_microseconds();
+            controls_.update(now);
+            const auto pad=controls_.peek_pad();
+            rt.memory().store32(destination,static_cast<std::uint32_t>(now));
+            rt.memory().store32(destination+4u,pad.buttons);
+            rt.memory().store8(destination+8u,pad.x);rt.memory().store8(destination+9u,pad.y);
+            for(unsigned b=10;b<16;++b)rt.memory().store8(destination+b,0);
+            acknowledge_keyboard_batch(destination,1);
+            calls.push_back("CtrlPeekBufferPositive destination="+psprecomp::hex32(destination)+" last_buttons="+psprecomp::hex32(pad.buttons));
+            c.set_gpr(2,1);
+        });
         rt.nids().add("sceRtc",0x3F7AD767u,"sceRtcGetCurrentTick");
         rt.register_hle("sceRtc",0x3F7AD767u,[this](auto&,auto& c){++time_calls_[2];
             const auto address=c.gpr[4];
@@ -2089,10 +2170,14 @@ private:
         const auto now=clock_.system_microseconds();display_.update(now);audio_.poll();controls_.update(now);
         if(requested_render_frames && verified_render_frames<requested_render_frames && !frame_stream && now>=verify_render_after_us){if(resident_gpu_ownership)complete_gpu_batch();frame_stream=std::make_unique<kon::NativeFrameStream>(rt.memory());renderer_.set_frame_stream(frame_stream.get());}
         if(profile_frames && now>=next_frame_sample_us_ && frame_samples_.size()<18001u){
-            ULONG64 cycles=0;QueryThreadCycleTime(GetCurrentThread(),&cycles); // CPU work, independent of clock speed
+            std::uint64_t cycles=0;
+#ifdef _WIN32
+            {ULONG64 native_cycles=0;QueryThreadCycleTime(GetCurrentThread(),&native_cycles);cycles=native_cycles;} // CPU work, independent of clock speed
+#endif
             frame_samples_.push_back({now,display_.submitted_frames(),render_time_us_[1],render_time_us_[2],cycles,renderer_.gpu_collect_wait_us});next_frame_sample_us_=now+100000u;
         }
         if(runtime_limit_us && now>=runtime_limit_us){rt.stop("Diagnostic runtime limit reached");return;}
+        if(result_deadline_us && now>=result_deadline_us){rt.stop("Result screen reached");return;}
         if(now>=next_progress_us_){next_progress_us_=now+5000000;const auto latency=display_.take_latency();check_freeze();
             try{renderer_.drain();}catch(const std::exception& error){rt.stop(error.what());return;} // counters below belong to the render thread
             std::cout<<"native_progress elapsed_ms="<<now/1000u<<" active_uid="<<psprecomp::runtime_thread_uid()<<" pc="<<psprecomp::hex32(rt.cpu().pc)<<" ra="<<psprecomp::hex32(rt.cpu().gpr[31])<<" draw_pixels="<<renderer_.draw_pixels<<" render_clear_us="<<render_time_us_[0]<<" render_2d_us="<<render_time_us_[1]<<" render_3d_us="<<render_time_us_[2]<<" projected_draws="<<projected_draws_<<" gpu_clear_primitives="<<renderer_.gpu_clear_primitives<<" gpu_clear_pixels="<<renderer_.gpu_clear_pixels<<" gpu_triangle_primitives="<<renderer_.gpu_triangle_primitives<<" gpu_triangle_pixels="<<renderer_.gpu_triangle_pixels<<" render_gpu_batch_us="<<gpu_batch_time_us<<" gpu_raster_primitives="<<renderer_.gpu_raster_primitives<<" gpu_raster_pixels="<<renderer_.gpu_raster_pixels<<" texture_cache_preparations="<<renderer_.texture_cache_preparations<<" texture_cache_hits="<<renderer_.texture_cache_hits<<" submitted_frames="<<display_.submitted_frames()<<" gpu_resident_words_reused="<<renderer_.gpu_resident_words_reused<<" gpu_collect_wait_us="<<renderer_.gpu_collect_wait_us<<" gpu_upload_us="<<renderer_.gpu_profile()[0]/1000u<<" gpu_shade_us="<<renderer_.gpu_profile()[1]/1000u<<" gpu_readback_us="<<renderer_.gpu_profile()[2]/1000u<<" gpu_dispatches="<<renderer_.gpu_profile()[3]<<" gpu_barriers="<<renderer_.gpu_profile()[4]<<" gpu_tile_job_pixels="<<renderer_.gpu_profile()[5]<<" input_latency_avg_us="<<(latency.frames?latency.total_us/latency.frames:0)<<" input_latency_max_us="<<latency.max_us<<" render_drains="<<renderer_.async_drains<<" drain_wait_us="<<renderer_.drain_wait_us<<" present_wait_us="<<renderer_.present_wait_us<<" vram_service_syncs="<<vram_service_syncs_<<" vram_hook_calls="<<vram_hook_calls_<<" vram_hook_collects="<<vram_hook_collects_<<" queued_draws="<<renderer_.pending_draws<<" queue_flushes="<<renderer_.pending_flushes<<" nonfinite_triangles="<<renderer_.nonfinite_triangles<<" overlap_waits="<<renderer_.overlap_waits[0]<<","<<renderer_.overlap_waits[1]<<","<<renderer_.overlap_waits[2]<<","<<renderer_.overlap_waits[3]<<","<<renderer_.overlap_waits[4]<<","<<renderer_.overlap_waits[5]<<" draw_covered_pixels="<<renderer_.draw_covered_pixels<<" display_present_us="<<display_.present_us()<<" presenter="<<display_.presenter()<<" hires_presents="<<display_.hires_presents()<<" hires_fallback_tiles="<<display_.hires_fallback_tiles()<<" hires_bad_presents="<<display_.hires_bad_presents()<<" idle_wait_us="<<idle_wait_us_<<" hook_collect_wait_us="<<hook_collect_wait_us<<" vblank_caught_up="<<vblank_caught_up_<<" masked_blocks="<<masked_blocks_<<" logic_ticks="<<logic_rate.published_ticks<<" logic_steps30="<<logic_rate.published_steps30<<" batch_clears="<<renderer_.batch_clear_primitives<<" flush_clear_vram="<<renderer_.flush_reasons[1]<<" flush_unsafe="<<renderer_.flush_reasons[2]<<" flush_identity="<<renderer_.flush_reasons[3]<<" flush_capacity="<<renderer_.flush_reasons[4]<<" texture_compared_bytes="<<kon::NativeTexture::compared_bytes()<<" vram_texture_flushes="<<renderer_.vram_texture_flushes<<" gpu_submits="<<renderer_.gpu_profile()[3]<<" vblank_waits="<<vblank_waits_[0]<<","<<vblank_waits_[1]<<","<<vblank_waits_[2]<<","<<vblank_waits_[3]<<" time_calls="<<time_calls_[0]<<","<<time_calls_[1]<<","<<time_calls_[2]<<","<<time_calls_[3]<<" guest_task_us="<<[&]{std::uint64_t total=0;for(const auto& [uid,t]:threads)total+=t.running_us;return total;}()<<"\n";
@@ -2328,6 +2413,7 @@ void kon_counter_summary(std::ostream& out){
 bool kon_step_active=false;double kon_step_nominal=1.0;std::uint64_t kon_step_frames=0;std::int32_t kon_step_thread=0; // the logic thread (waits for vblank)
 struct StepSiteStats{std::uint64_t frames=0,last_frame=~0ull,hits[2]{},moved[2]{},same=0;double sum[2]{};std::uint32_t first_address=0,addresses=0,first_delta_bits=0;bool have_delta=false;void* stack[8]{};unsigned depth=0;};
 std::unordered_map<std::uint64_t,StepSiteStats> kon_step_stats;
+#ifdef _WIN32
 extern "C" void kon_step_site(std::uint32_t site,std::uint32_t address,std::uint32_t old_value,std::uint32_t new_value,std::uint32_t kind,std::uint32_t ra){
     static const bool all_threads=std::getenv("KON_STEP_ALL_THREADS")!=nullptr; // diagnostics: include other guest threads
     if(!kon_step_active || (!all_threads && psprecomp::runtime_thread_uid()!=kon_step_thread))return;
@@ -2363,7 +2449,9 @@ void kon_step_summary(std::ostream& out){
     }
     if(symbols)SymCleanup(process);
 }
+#ifdef _WIN32
 namespace {
+#endif
 // Diagnostic for PSPRECOMP_WATCH_WRITE (+ _SIZE, optional _AFTER_MS): groups
 // watched guest stores by native store site and, at exit, resolves each site
 // to generated source lines (file:line maps to the guest address through the
@@ -2399,10 +2487,20 @@ void watch_write_summary(std::ostream& out){
     }
     if(symbols)SymCleanup(process);
 }
+#else
+// Android has no DbgHelp/CaptureStackBackTrace diagnostics. Keep the symbols
+// the generated corpus and the runtime reference so linking still works.
+extern "C" void kon_step_site(std::uint32_t,std::uint32_t,std::uint32_t,std::uint32_t,std::uint32_t,std::uint32_t){}
+void kon_step_summary(std::ostream&){}
+void watch_write_stack(std::uint32_t,std::size_t,std::uint64_t,std::uint64_t){}
+namespace { void watch_write_summary(std::ostream&){} }
+#endif
 void guest_return(psprecomp::Runtime& rt,psprecomp::AllegrexContext& c) {
     if(active_services) active_services->returned(c); else rt.stop("Guest entry returned");
 }
+#ifdef _WIN32
 }
+#endif
 #ifndef KON_SERVICE_FIXTURE
 // Diagnostic (KON_TRACE_PCS=0xLO-0xHI, with PSPRECOMP_NO_CHAIN=1 so every
 // call is dispatched): the first time each guest function address in the
@@ -2424,12 +2522,14 @@ void report(){for(const auto& [pc,e]:seen)std::cout<<"trace_pc pc="<<psprecomp::
 }
 int main(int argc,char** argv) {
     // Installation from the player's ISO (INSTALAR.cmd): "--install [--root folder] [iso...]".
+#ifdef _WIN32
     if(argc>=2 && std::string(argv[1])=="--install"){
         SetConsoleOutputCP(CP_UTF8);
         std::filesystem::path root=std::filesystem::absolute(argv[0]).parent_path();std::vector<std::filesystem::path> isos;
         for(int i=2;i<argc;++i){if(std::string(argv[i])=="--root" && i+1<argc)root=argv[++i];else isos.emplace_back(argv[i]);}
         return kon::install_from_isos(root,isos);
     }
+#endif
     try {
         std::filesystem::path root=std::filesystem::current_path();
         std::string language="en",gpu_adapter="auto";bool language_given=false;
@@ -2439,6 +2539,7 @@ int main(int argc,char** argv) {
         std::uint64_t dispatch_budget=100000000u;bool dispatch_budget_given=false;
         std::filesystem::path capture;unsigned hold_ms=0;
         std::filesystem::path replay,storage,audio_replay,render_profile,frame_profile,projected_draw_capture,quad_draw_capture;unsigned projected_after_ms=0,projected_min_vertices=64;
+        unsigned stop_on_result_ms=0; // --stop-on-result[=ms]: stop after the results screen loads
         for(int i=1;i<argc;i++) {
             const std::string arg=argv[i];
             if(arg=="--root" && i+1<argc) root=argv[++i];
@@ -2497,7 +2598,9 @@ int main(int argc,char** argv) {
             else if(arg=="--capture-frame" && i+1<argc)capture=argv[++i];
             else if(arg=="--capture-interval-ms" && i+1<argc){const auto value=std::stoull(argv[++i]);if(value<50 || value>1800000)throw std::runtime_error("Capture interval must be between 50 and 1800000 milliseconds");capture_interval_ms=static_cast<unsigned>(value);}
             else if(arg=="--hold-on-stop" && i+1<argc){hold_ms=std::stoul(argv[++i]);if(hold_ms>300000u)throw std::runtime_error("Diagnostic hold exceeds five minutes");}
-            else throw std::runtime_error("Usage: kon_boot_probe [--root path] [--language pack-id] [--bootstrap] [--window] [--userdata path] [--capture-frame path] [--capture-interval-ms milliseconds] [--hold-on-stop milliseconds] [--max-dispatches count] [--max-runtime-ms milliseconds] [--stop-after-visible-frame] [--trace-render] [--trace-hle] [--persistent-texture-cache] [--raster-threads 1-16] [--show-test-window] [--verify-render-frames 1-4] [--verify-render-after-ms milliseconds] [--gpu-adapter auto/amd/nvidia/integrated/discrete/index/name] [--vulkan-clear] [--vulkan-triangles] [--vulkan-raster] [--vulkan-batch] [--vulkan-resident-batch] [--vulkan] [--profile-render path] [--profile-frames path] [--capture-small-quad path] [--capture-3d-draw path] [--capture-3d-after-ms milliseconds] [--capture-3d-min-vertices count] [--input-replay path] [--audio-anchored-input-replay path] [--input-anchor-channel 0-7]");
+            else if(arg=="--stop-on-result")stop_on_result_ms=5000;
+            else if(arg.rfind("--stop-on-result=",0)==0){const auto value=std::stoul(arg.substr(17));if(value>600000u)throw std::runtime_error("--stop-on-result accepts 0-600000 milliseconds");stop_on_result_ms=static_cast<unsigned>(value);}
+            else throw std::runtime_error("Usage: kon_boot_probe [--root path] [--language pack-id] [--bootstrap] [--window] [--userdata path] [--capture-frame path] [--capture-interval-ms milliseconds] [--hold-on-stop milliseconds] [--stop-on-result[=milliseconds]] [--max-dispatches count] [--max-runtime-ms milliseconds] [--stop-after-visible-frame] [--trace-render] [--trace-hle] [--persistent-texture-cache] [--raster-threads 1-16] [--show-test-window] [--verify-render-frames 1-4] [--verify-render-after-ms milliseconds] [--gpu-adapter auto/amd/nvidia/integrated/discrete/index/name] [--vulkan-clear] [--vulkan-triangles] [--vulkan-raster] [--vulkan-batch] [--vulkan-resident-batch] [--vulkan] [--profile-render path] [--profile-frames path] [--capture-small-quad path] [--capture-3d-draw path] [--capture-3d-after-ms milliseconds] [--capture-3d-min-vertices count] [--input-replay path] [--audio-anchored-input-replay path] [--input-anchor-channel 0-7]");
         }
         if(argc==1){
             // Double-click: an installation (tools/make_install.py) keeps its data
@@ -2549,8 +2652,13 @@ int main(int argc,char** argv) {
             if(!std::filesystem::exists(file,error)){std::filesystem::create_directories(file.parent_path(),error);std::ofstream(file)<<kon::ButtonMap::template_text();}
             for(const auto& problem:kon::ButtonMap::instance().load(file))std::cout<<"controls_ini_problem="<<problem<<'\n';
         }
-        if(!replay.empty() && ((window && !show_test_window) || !bootstrap))throw std::runtime_error("Controller replay requires a headless bootstrap test");
-        if(!audio_replay.empty() && ((window && !show_test_window) || !bootstrap || replay.empty()))throw std::runtime_error("Audio-anchored input requires a headless bootstrap test and a menu replay");
+        // Synthetic input (diagnostics): a normal player window consumes it from
+        // the pad source exactly like the headless bootstrap test, so a window no
+        // longer rejects it. The audio-anchored chart still needs the menu replay
+        // that reaches the song. Without these options the game path is unchanged.
+        if(!replay.empty() && !window && !bootstrap)throw std::runtime_error("Controller replay requires a running guest (--window or --bootstrap)");
+        if(!audio_replay.empty() && replay.empty())throw std::runtime_error("Audio-anchored input requires a menu replay (--input-replay)");
+        if(!replay.empty() && window && !show_test_window)std::cout<<"synthetic_input_window=1 (test replay; hardware input ignored)\n";
         if(capture_interval_ms && capture.empty())throw std::runtime_error("Periodic captures require --capture-frame path");
         const auto executable=content.root()/"analysis/executables/pkon.elf";
         if(psprecomp::sha256_file(executable)!=kElfHash) throw std::runtime_error("Wrong ELF: rebuild generated code for this input");
@@ -2562,7 +2670,12 @@ int main(int argc,char** argv) {
         if(!module || module->name!="pkon") throw std::runtime_error("Wrong module-info");
         const auto imports=image.scan_imports(runtime.memory(),*module);
         if(imports.size()!=238) throw std::runtime_error("Wrong import table");
+#ifdef __ANDROID__
+        if(!kon_android_game_register)throw std::runtime_error("Android game module is not loaded");
+        kon_android_game_register(runtime);
+#else
         psprecomp::register_generated_functions(runtime);
+#endif
         runtime.register_function(kReturnPc,guest_return,"bootstrap return sentinel");
         std::uint32_t loaded_end=0;
         for(std::size_t n=0;n<image.segments().size();n++) {
@@ -2654,6 +2767,8 @@ int main(int argc,char** argv) {
         services.trace_render=trace_render;if(!draw_dump.empty()){services.draw_dump_=std::make_unique<std::ofstream>(draw_dump);services.draw_dump_begin_us_=draw_dump_begin_ms*1000u;services.draw_dump_end_us_=draw_dump_end_ms*1000u;}services.profile_render=!render_profile.empty();services.profile_frames=!frame_profile.empty();
         services.quad_draw_capture=quad_draw_capture;services.projected_draw_capture=projected_draw_capture;services.projected_capture_min_vertices=projected_min_vertices;services.projected_capture_after_us=static_cast<std::uint64_t>(projected_after_ms)*1000u;
         services.runtime_limit_us=static_cast<std::uint64_t>(runtime_limit_ms)*1000u;
+        services.stop_on_result_us=static_cast<std::uint64_t>(stop_on_result_ms)*1000u;
+        if(stop_on_result_ms)services.activity_.on_results=[&services]{services.result_screen_loaded();};
         services.progress_capture=capture;services.capture_interval_us=static_cast<std::uint64_t>(capture_interval_ms)*1000u;
         if(!replay.empty()){services.control_replay.load(replay);std::cout<<"synthetic_controller_replay="<<replay.string()<<" (hardware input unverified)\n";}
         if(!audio_replay.empty()){services.audio_anchored_replay.load(audio_replay);services.input_anchor_channel=anchor_channel;std::cout<<"synthetic_audio_anchored_replay="<<audio_replay.string()<<" channel="<<anchor_channel<<" (timing hypotheses, hardware input unverified)\n";}
@@ -2661,7 +2776,7 @@ int main(int argc,char** argv) {
         if(bootstrap) {
             services.install();
             if(!sample_profile.empty()){const auto origin=std::chrono::steady_clock::now();
-                profiler=std::make_unique<kon::NativeSamplingProfiler>(sample_render_thread?services.render_thread_id():GetCurrentThreadId(),[origin,sample_begin_ms,sample_end_ms,&services]{const auto ms=std::uint64_t(std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now()-origin).count());return ms>=sample_begin_ms && ms<sample_end_ms && (!services.profile_ge_only || services.in_ge.load(std::memory_order_relaxed));});}
+                profiler=std::make_unique<kon::NativeSamplingProfiler>(sample_render_thread?services.render_thread_id():kon_current_thread_id(),[origin,sample_begin_ms,sample_end_ms,&services]{const auto ms=std::uint64_t(std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now()-origin).count());return ms>=sample_begin_ms && ms<sample_end_ms && (!services.profile_ge_only || services.in_ge.load(std::memory_order_relaxed));});}
             psprecomp::set_runtime_post_import_hook([](auto&,auto& c){if(active_services)active_services->import_boundary(c);});
             psprecomp::set_runtime_starvation_hook([](auto&,auto& c){if(active_services)active_services->dispatch_boundary(c);},1024);
         }
@@ -2710,7 +2825,7 @@ int main(int argc,char** argv) {
                 std::cout<<"worker_stop="<<runtime.stop_reason()<<"\nworker_PC="<<psprecomp::hex32(cpu.pc)<<"\n";
                 // Played from the launcher: the console closes with the window,
                 // so any stop other than closing it leaves a report next to the game.
-                if(window && !show_test_window && runtime.stop_reason()!="Native game window closed" && runtime.stop_reason()!=BootstrapServices::kRestartReason){
+                if(window && !show_test_window && runtime.stop_reason()!="Native game window closed" && runtime.stop_reason()!="Result screen reached" && runtime.stop_reason()!=BootstrapServices::kRestartReason){
                     std::ofstream report(root/"ultimo_fallo.txt");
                     const auto now=std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());char when[32]{};std::strftime(when,sizeof(when),"%Y-%m-%d %H:%M:%S",std::localtime(&now));
                     report<<"fecha="<<when<<"\nmotivo="<<runtime.stop_reason()<<"\nPC="<<psprecomp::hex32(cpu.pc)<<"\nRA="<<psprecomp::hex32(cpu.gpr[31])<<"\nhilo="<<psprecomp::runtime_thread_uid()<<"\n";
@@ -2738,6 +2853,7 @@ int main(int argc,char** argv) {
         // Language changed in Settings: the same command starts again, without
         // --language so the saved choice applies (test windows only log it,
         // unless KON_TEST_RESTART=1 checks the restart itself).
+#ifdef _WIN32
         if(services.restart_requested_ && window && (!show_test_window || std::getenv("KON_TEST_RESTART"))){
             std::wstring command;wchar_t module[MAX_PATH]{};GetModuleFileNameW(nullptr,module,MAX_PATH);
             const auto quote=[](const std::wstring& s){return L"\""+s+L"\"";};
@@ -2753,6 +2869,11 @@ int main(int argc,char** argv) {
             if(CreateProcessW(nullptr,command.data(),nullptr,nullptr,FALSE,0,nullptr,nullptr,&startup,&process)){CloseHandle(process.hThread);CloseHandle(process.hProcess);}
             else std::cerr<<"Language restart failed: "<<GetLastError()<<"\n";
         }
+#else
+        // Android: the Activity restarts the game with the saved language when
+        // the native thread returns this code.
+        if(services.restart_requested_)std::cout<<"language_restart_requested\n";
+#endif
         return 2;
     } catch(const std::exception& error) {
         std::cerr<<"Diagnostic failed: "<<error.what()<<"\n";

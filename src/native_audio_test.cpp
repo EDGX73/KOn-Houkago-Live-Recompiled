@@ -14,7 +14,12 @@ int main(){try{
         mixer.min_queued_frames=0;kon::NativeAudioMixer original;original.reserve(0,448,0);
         check(!original.submit(0,pcm,0) && original.submit(0,pcm,0)==1,"Original one-ahead blocking semantics changed");
     }
-    _putenv_s("KON_AUDIO_QUEUE_MS","0"); // the device checks below use the original one-ahead semantics
+    // the device checks below use the original one-ahead semantics
+#ifdef _WIN32
+    _putenv_s("KON_AUDIO_QUEUE_MS","0");
+#else
+    setenv("KON_AUDIO_QUEUE_MS","0",1);
+#endif
     kon::NativeAudio audio;
     check(audio.reserve(8,448,0)==kon::NativeAudio::invalid_channel && audio.reserve(-1,450,0)==0x80260006u && audio.reserve(-1,448,1)==0x80260007u,"Invalid channel parameters accepted");
     const auto channel=audio.reserve(-1,448,0);check(channel==0 && audio.sample_count(channel)==448,"Actual Windows device did not reserve channel");

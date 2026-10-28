@@ -1,0 +1,8 @@
+﻿FFmpeg 8.1 — LGPL 2.1 o posterior
+
+libkon_runtime.so enlaza estáticamente libavcodec.a, libavformat.a,
+libavutil.a y libswresample.a de FFmpeg 8.1, compilados con --disable-gpl,
+--disable-nonfree, --disable-version3, --disable-asm y --disable-inline-asm.
+Texto: FFmpeg-LICENSE-LGPL-2.1.txt. Fuente completa y recetas:
+assets/toolchain/SOURCES/ (ffmpeg-8.1.tar.xz, ffmpeg-build-scripts/).
+Reenlace: FFmpeg-RELINK.md.

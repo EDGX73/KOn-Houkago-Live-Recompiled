@@ -1,7 +1,4 @@
-#ifndef WIN32_LEAN_AND_MEAN
-#define WIN32_LEAN_AND_MEAN
-#endif
-#include <windows.h>
+#include "platform/keyboard.hpp"
 #include "native_controls.hpp"
 #include "native_gamepads.hpp"
 #include "native_glyphs.hpp"
@@ -10,8 +7,7 @@ namespace kon {
 // generic HID pads, see native_gamepads.hpp): the union of their states.
 HostPad read_host_pad(bool focused){
     HostPad pad;if(!focused)return pad;
-    const auto key=[](int code){return (GetAsyncKeyState(code)&0x8000)!=0;};
-    pad=keyboard_pad(key);
+    pad=keyboard_pad([](int code){return platform::key_down(code);});
     if(pad.buttons || pad.x!=128 || pad.y!=128)GamepadHub::instance().note_keyboard();
     const auto controllers=GamepadHub::instance().read();
     pad.buttons|=controllers.buttons;

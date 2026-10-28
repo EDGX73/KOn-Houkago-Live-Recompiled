@@ -1,6 +1,4 @@
-#define WIN32_LEAN_AND_MEAN
-#define NOMINMAX
-#include <windows.h>
+#include "platform/library.hpp"
 #define VK_NO_PROTOTYPES
 #include <vulkan/vulkan.h>
 #include "native_gpu_selection.hpp"
@@ -15,18 +13,18 @@ namespace {
 void checked(VkResult value,const char* operation){if(value!=VK_SUCCESS)throw std::runtime_error(std::string(operation)+" VkResult="+std::to_string(value));}
 std::string quoted(const char* value){std::string result="\"";for(const unsigned char ch:std::string(value)){if(ch=='"' || ch=='\\')result+='\\';if(ch<32)throw std::runtime_error("Unexpected control byte in Vulkan device name");result+=ch;}return result+'"';}
 struct Handles {
-    HMODULE loader=nullptr;VkInstance instance=nullptr;VkDevice device=nullptr;VkBuffer buffer=nullptr;VkDeviceMemory memory=nullptr;VkCommandPool pool=nullptr;VkFence fence=nullptr;bool mapped=false;
+    kon::platform::DynamicLibrary loader;VkInstance instance=nullptr;VkDevice device=nullptr;VkBuffer buffer=nullptr;VkDeviceMemory memory=nullptr;VkCommandPool pool=nullptr;VkFence fence=nullptr;bool mapped=false;
     PFN_vkDestroyInstance destroy_instance=nullptr;PFN_vkDestroyDevice destroy_device=nullptr;PFN_vkDeviceWaitIdle idle=nullptr;
     PFN_vkDestroyBuffer destroy_buffer=nullptr;PFN_vkFreeMemory free_memory=nullptr;PFN_vkDestroyCommandPool destroy_pool=nullptr;PFN_vkDestroyFence destroy_fence=nullptr;PFN_vkUnmapMemory unmap=nullptr;
     VkShaderModule shader=nullptr;VkDescriptorSetLayout descriptor_layout=nullptr;VkPipelineLayout pipeline_layout=nullptr;VkPipeline pipeline=nullptr;VkDescriptorPool descriptor_pool=nullptr;
     PFN_vkDestroyShaderModule destroy_shader=nullptr;PFN_vkDestroyDescriptorSetLayout destroy_descriptor_layout=nullptr;PFN_vkDestroyPipelineLayout destroy_pipeline_layout=nullptr;PFN_vkDestroyPipeline destroy_pipeline=nullptr;PFN_vkDestroyDescriptorPool destroy_descriptor_pool=nullptr;
-    ~Handles(){if(device){if(idle)idle(device);if(descriptor_pool && destroy_descriptor_pool)destroy_descriptor_pool(device,descriptor_pool,nullptr);if(pipeline && destroy_pipeline)destroy_pipeline(device,pipeline,nullptr);if(pipeline_layout && destroy_pipeline_layout)destroy_pipeline_layout(device,pipeline_layout,nullptr);if(descriptor_layout && destroy_descriptor_layout)destroy_descriptor_layout(device,descriptor_layout,nullptr);if(shader && destroy_shader)destroy_shader(device,shader,nullptr);if(mapped && unmap)unmap(device,memory);if(fence && destroy_fence)destroy_fence(device,fence,nullptr);if(pool && destroy_pool)destroy_pool(device,pool,nullptr);if(buffer && destroy_buffer)destroy_buffer(device,buffer,nullptr);if(memory && free_memory)free_memory(device,memory,nullptr);if(destroy_device)destroy_device(device,nullptr);}if(instance && destroy_instance)destroy_instance(instance,nullptr);if(loader)FreeLibrary(loader);}
+    ~Handles(){if(device){if(idle)idle(device);if(descriptor_pool && destroy_descriptor_pool)destroy_descriptor_pool(device,descriptor_pool,nullptr);if(pipeline && destroy_pipeline)destroy_pipeline(device,pipeline,nullptr);if(pipeline_layout && destroy_pipeline_layout)destroy_pipeline_layout(device,pipeline_layout,nullptr);if(descriptor_layout && destroy_descriptor_layout)destroy_descriptor_layout(device,descriptor_layout,nullptr);if(shader && destroy_shader)destroy_shader(device,shader,nullptr);if(mapped && unmap)unmap(device,memory);if(fence && destroy_fence)destroy_fence(device,fence,nullptr);if(pool && destroy_pool)destroy_pool(device,pool,nullptr);if(buffer && destroy_buffer)destroy_buffer(device,buffer,nullptr);if(memory && free_memory)free_memory(device,memory,nullptr);if(destroy_device)destroy_device(device,nullptr);}if(instance && destroy_instance)destroy_instance(instance,nullptr);}  // the loader member is released last
 };
 }
 int main(int argc,char** argv){try{
     if(argc!=3)throw std::runtime_error("Usage: native_vulkan_shader_test own-clear.spv verification.json");
-    Handles h;h.loader=LoadLibraryExW(L"vulkan-1.dll",nullptr,LOAD_LIBRARY_SEARCH_SYSTEM32);if(!h.loader)throw std::runtime_error("Installed system Vulkan loader is unavailable");
-    const auto get_instance=reinterpret_cast<PFN_vkGetInstanceProcAddr>(GetProcAddress(h.loader,"vkGetInstanceProcAddr"));if(!get_instance)throw std::runtime_error("Missing Vulkan loader entry");
+    Handles h;h.loader=kon::platform::open_vulkan_loader();if(!h.loader)throw std::runtime_error("Installed system Vulkan loader is unavailable");
+    const auto get_instance=h.loader.symbol<PFN_vkGetInstanceProcAddr>("vkGetInstanceProcAddr");if(!get_instance)throw std::runtime_error("Missing Vulkan loader entry");
     const auto get=[&](const char* name){auto fn=get_instance(h.instance,name);if(!fn)throw std::runtime_error(std::string("Missing Vulkan entry ")+name);return fn;};
     const auto create_instance=reinterpret_cast<PFN_vkCreateInstance>(get("vkCreateInstance"));
     VkApplicationInfo application{VK_STRUCTURE_TYPE_APPLICATION_INFO};application.pApplicationName="K-On native GPU diagnostic";application.apiVersion=VK_API_VERSION_1_0;

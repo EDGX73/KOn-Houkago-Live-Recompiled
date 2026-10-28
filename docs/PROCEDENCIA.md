@@ -8,7 +8,7 @@ ni sus recursos. El repositorio local excluye estos materiales mediante
 
 | Componente | Origen y uso | Licencia/registro |
 | --- | --- | --- |
-| PSPRecomp | [Repositorio](https://github.com/jessicanataliagta/PSPRecomp), base `f6e7d415c7f447b934cc3865a31eb725f353d659`; análisis y generación nativa | MIT; licencia en la copia de `third_party/PSPRecomp` |
+| PSPRecomp | [Repositorio](https://github.com/jessicanataliagta/PSPRecomp), base `f6e7d415c7f447b934cc3865a31eb725f353d659`; análisis y generación nativa. Los cambios del port se publican como parche (`patches/psprecomp/kon-port.patch`) y `tools/psprecomp_patch.py fetch` lo aplica sobre esa revisión | MIT; licencia en `patches/psprecomp/PSPRecomp-LICENSE.txt` |
 | pspdecrypt 1.0 | [Herramienta](https://github.com/John-K/pspdecrypt), usada por separado sobre una copia de EBOOT | GPLv3; binario y fuente conservados en `third_party` |
 | Zig, CMake y Ninja | Compilación local portable | Versiones, hashes, enlaces y licencias conservados; véase TOOLCHAIN.md |
 | PPSSPP | [Código de referencia](https://github.com/hrydgard/ppsspp), consultado para ABI, semántica de instrucciones y nombres de servicios | Proyecto GPL; no se enlaza ni se copia su implementación en el runtime propio |
@@ -18,7 +18,13 @@ ni sus recursos. El repositorio local excluye estos materiales mediante
 
 Los parsers `iso_audit.py`, `cpk_archive.py`, `fmdx_archive.py` y
 `executable_audit.py`, la integración y los servicios de arranque son código
-escrito para este proyecto. Las correcciones a PSPRecomp son reproducibles con:
+escrito para este proyecto. Todas las correcciones a PSPRecomp (184 líneas en 8
+archivos, 2026-10-20) están en `patches/psprecomp/kon-port.patch`, que se
+reproduce exactamente sobre la revisión fijada (`tools/psprecomp_patch.py`
+`fetch`/`write`/`check`). Se escribieron primero con estos scripts, que se
+conservan como historial; los cambios posteriores (observador de escrituras,
+accesos directos al scratchpad, etc.) solo están en el parche, así que los
+scripts ya no se aplican sobre las fuentes actuales:
 
 - `tools/apply_framework_patches.py`: module-info sin nombres y regiones de código.
 - `tools/extend_framework.py`: MADD, BREAK y generación sin optimizaciones opcionales.

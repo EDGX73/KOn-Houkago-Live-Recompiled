@@ -1,9 +1,5 @@
 #include "native_media.hpp"
-#ifndef NOMINMAX
-#define NOMINMAX
-#endif
-#define WIN32_LEAN_AND_MEAN
-#include <windows.h>
+#include "platform/library.hpp"
 extern "C" {
 #include <libavcodec/avcodec.h>
 #include <libavformat/avformat.h>
@@ -19,20 +15,25 @@ extern "C" {
 #include <cstring>
 namespace kon {
 namespace {
+#ifdef __ANDROID__
+// Static FFmpeg for Android: the functions are linked directly, no DLLs.
 class SharedLibrary {
 public:
-    explicit SharedLibrary(const std::filesystem::path& path){
-        handle_=LoadLibraryExW(path.c_str(),nullptr,LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR|LOAD_LIBRARY_SEARCH_DEFAULT_DIRS);
-        if(!handle_)throw std::runtime_error("Cannot load native media library "+path.filename().string()+" Windows error="+std::to_string(GetLastError()));
-    }
-    ~SharedLibrary(){if(handle_)FreeLibrary(handle_);}
-    SharedLibrary(const SharedLibrary&)=delete;SharedLibrary& operator=(const SharedLibrary&)=delete;
-    template<class T>T symbol(const char* name) const {
-        const auto pointer=GetProcAddress(handle_,name);if(!pointer)throw std::runtime_error(std::string("Missing native media API ")+name);
-        return reinterpret_cast<T>(pointer);
-    }
-private:HMODULE handle_=nullptr;
+    explicit SharedLibrary(const std::filesystem::path&){}
 };
+#else
+class SharedLibrary {
+public:
+    explicit SharedLibrary(const std::filesystem::path& path):library_(path,platform::DynamicLibrary::Search::LibraryFolder){
+        if(!library_)throw std::runtime_error("Cannot load native media library "+path.filename().string()+" "+library_.error());
+    }
+    template<class T>T symbol(const char* name) const {
+        const auto pointer=library_.symbol<T>(name);if(!pointer)throw std::runtime_error(std::string("Missing native media API ")+name);
+        return pointer;
+    }
+private:platform::DynamicLibrary library_;
+};
+#endif
 template<class F>struct Cleanup {F fn;~Cleanup(){fn();}};
 }
 struct NativeMedia::Impl {
@@ -41,7 +42,11 @@ struct NativeMedia::Impl {
     struct AtracSlot {AVCodecID type;AVCodecContext* decoder=nullptr;bool bound=false;SwrContext* converter=nullptr;};
     std::vector<AtracSlot> atrac_slots;
     AVCodecContext* video_decoder=nullptr;
+#ifdef __ANDROID__
+#define MEDIA_API(name,lib) decltype(&::name) name=&::name
+#else
 #define MEDIA_API(name,lib) decltype(&::name) name=lib.symbol<decltype(&::name)>(#name)
+#endif
     MEDIA_API(av_version_info,util);MEDIA_API(av_strerror,util);MEDIA_API(av_frame_alloc,util);MEDIA_API(av_frame_free,util);
     MEDIA_API(avcodec_license,codec);MEDIA_API(avcodec_configuration,codec);MEDIA_API(avcodec_find_decoder,codec);
     MEDIA_API(avcodec_alloc_context3,codec);MEDIA_API(avcodec_free_context,codec);MEDIA_API(avcodec_parameters_to_context,codec);

@@ -13,7 +13,10 @@ from music_chart import Chart, ChartError
 class MusicChartTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.archive = FmdxArchive(ROOT / "assets/source/en/std/PSP_GAME/USRDIR/bind/play_m03_single.bin")
+        bundle = ROOT / "assets/source/en/std/PSP_GAME/USRDIR/bind/play_m03_single.bin"
+        if not bundle.is_file():  # the game's own data: only on a PC with the installed disc
+            raise unittest.SkipTest("needs the original chart bundle (assets/source)")
+        cls.archive = FmdxArchive(bundle)
         cls.samples = [(e.path, cls.archive.read(e)) for e in cls.archive.entries if e.path.endswith(".ksd")]
         cls.normal = next(b for name, b in cls.samples if name.endswith("hotchkiss_gt1_no.ksd"))
 

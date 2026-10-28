@@ -1,0 +1,29 @@
+# Second layer of the publication controls (docs/PUBLICACION.md): the first one
+# runs locally before every push. Nothing here builds, publishes or releases.
+name: Publication audit
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Audit the tree
+        run: python tools/audit_public.py --tree .
+      - name: Audit the commits of the pull request
+        if: github.event_name == 'pull_request'
+        run: python tools/audit_public.py --git-commits . "${{ github.event.pull_request.base.sha }}..${{ github.event.pull_request.head.sha }}"
+      - name: Tests of the tools that need no game data
+        run: python -m unittest discover -s tools/tests -p "test_*.py" -v
